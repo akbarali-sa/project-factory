@@ -1,0 +1,589 @@
+"""
+Project Factory — full first-slice pipeline (LangGraph, Python).
+
+  ingest(det) -> gap_detect(HAIKU) -> [GATE A]
+  -> clone_starter(det) -> provision_db(det) -> baseline(det) -> commit_specs(det)
+  -> architect(OPUS) -> contract_lint(det) -> [GATE B]
+  -> migrate(det)
+  -> write_tests(SONNET: unit + e2e) -> red_first(det)
+  -> implement_api(SONNET->OPUS) -> verify_api(det) --fail--> diagnose(OPUS) --+
+  -> implement_web(SONNET->OPUS) -> verify_web(det) --fail--> diagnose(OPUS) --+
+  -> launch_stack(det, docker) -> verify_e2e(det, playwright) --fail--> diagnose+
+  -> teardown(det) -> commit -> open Draft PR -> [GATE C] -> END
+
+Checkpointing: local Postgres (docker/docker-compose.state.yml, port 5433), so
+every agent step is durable and a killed run resumes exactly where it stopped.
+The thread_id is derived as <slug>:<slice_id>, so resume is automatic.
+
+Paths are never guessed here — the CLI resolves them via config.discover().
+
+Run:
+  docker compose -f docker/docker-compose.state.yml up -d
+  python -m project_factory run <slug>
+"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+import subprocess
+from typing import Annotated, Any, Literal, TypedDict
+
+import yaml
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
+
+from . import config, infra, repo as repo_mod
+from .harness import (
+    check_contract,
+    check_red_first,
+    check_traceability,
+    check_write_scope,
+    run_tests,
+)
+from .models import BudgetExceeded, Usage, claude
+
+MAX_ATTEMPTS = 3
+
+WRITE_API = ["apps/api/src/**"]
+WRITE_WEB = ["apps/web/src/**", "packages/ui/src/**"]
+READ_ONLY = ["**/__tests__/**", "**/e2e/**", "**/*.spec.ts", "**/*.test.ts", "specs/**"]
+
+
+# -----------------------------------------------------------------------------
+def _last(a: Any, b: Any) -> Any:
+    return b if b is not None else a
+
+
+def _merge(a: dict | None, b: dict | None) -> dict:
+    return {**(a or {}), **(b or {})}
+
+
+class S(TypedDict, total=False):
+    # resolved by the CLI via config.discover() — the graph never guesses paths
+    cfg: dict
+    board_path: str
+    scenarios_path: str
+    repo_path: str
+    project_dir: str
+    slice_id: str
+
+    ir: dict
+    scenarios: dict
+    gaps: list[dict]
+    starter_sha: str
+    stack: Any                       # infra.Stack
+    contract: str
+
+    phase_out: Annotated[dict, _merge]     # phase -> last test output
+    attempts: Annotated[dict, _merge]      # phase -> count
+    diagnosis: Annotated[dict, _merge]     # phase -> fix instruction
+    status: Literal["pending", "green", "parked"]
+    parked: Annotated[list[str], lambda a, b: (a or []) + (b or [])]
+
+    usage: Annotated[Usage, _last]
+    log: Annotated[list[str], lambda a, b: (a or []) + (b or [])]
+
+
+def _budget(state: S) -> float:
+    return float(state["cfg"].get("budget_usd", 25.0))
+
+
+# =============================================================================
+# 1. Ingest (deterministic)
+# =============================================================================
+def ingest(state: S) -> dict:
+    # Paths come from discovery (config.py), not from run.json — the CLI resolves
+    # them and passes them in, so nothing here needs to know the layout.
+    board = json.loads(pathlib.Path(state["board_path"]).read_text())
+    scen = yaml.safe_load(pathlib.Path(state["scenarios_path"]).read_text())
+    in_scope = [e for e in board["business_events"]
+                if "Out-of-Scope" not in (e.get("bounded_context") or "")]
+    return {
+        "ir": {"project": board["name"], "events": in_scope,
+               "processes": board.get("processes", []),
+               "decisions": board.get("decision_log", [])},
+        "scenarios": scen,
+        "attempts": {}, "phase_out": {}, "diagnosis": {},
+        "status": "pending", "usage": Usage(),
+        "log": [f"ingest: {len(in_scope)} in-scope events, "
+                f"{len(scen['scenarios'])} api + "
+                f"{len(scen.get('web_scenarios', []))} web + "
+                f"{len(scen.get('e2e_scenarios', []))} e2e scenarios"],
+    }
+
+
+# =============================================================================
+# 2. Spec Analyst (AGENT — Haiku)
+# =============================================================================
+def gap_detect(state: S) -> dict:
+    digest = [{
+        "id": e["id"], "name": e["name"],
+        "rules": len(e["implementation"].get("business_rules", [])),
+        "ac": len(e["implementation"].get("acceptance_criteria", [])),
+        "open_questions": [q["question"] for q in e.get("questions", [])
+                           if q.get("status") != "answered"],
+    } for e in state["ir"]["events"]]
+
+    out = claude(
+        "spec_analyst",
+        "You audit a software specification for completeness. For each item, "
+        "decide if it can be implemented without guessing. Flag anything with no "
+        "business rules, unanswered questions, or untestable acceptance criteria."
+        f"\n\n{json.dumps(digest, indent=1)}\n\n"
+        'Return ONLY JSON: [{"id":...,"verdict":"ok"|"underspecified","missing":[...]}]',
+        usage=state["usage"], budget_usd=_budget(state),
+    )
+    try:
+        gaps = json.loads(out[out.index("["):out.rindex("]") + 1])
+    except (ValueError, json.JSONDecodeError):
+        gaps = [{"id": "?", "verdict": "parse_error", "raw": out[:300]}]
+    n = len([g for g in gaps if g.get("verdict") == "underspecified"])
+    return {"gaps": gaps, "log": [f"gap_detect: {n} underspecified"]}
+
+
+def gate_spec(state: S) -> dict:
+    d = interrupt({
+        "gate": "A — spec & scenarios (you are approving the ORACLE)",
+        "underspecified": [g for g in state["gaps"]
+                           if g.get("verdict") == "underspecified"],
+        "provisional_held_back": [s["id"] for s in
+                                  state["scenarios"].get("provisional_scenarios", [])],
+        "ask": "Approve to proceed.",
+    })
+    return {"log": [f"gate_A: {d}"]}
+
+
+# =============================================================================
+# 3. Clone starter (deterministic) — 1) in your list
+# =============================================================================
+def clone_starter(state: S) -> dict:
+    cfg = state["cfg"]
+    info = repo_mod.create_project_repo(
+        factory_root=str(config.factory_root()),
+        starter_url=cfg["starter_url"],
+        starter_ref=cfg.get("starter_ref", "main"),
+        repo_path=state["repo_path"],
+        fresh=cfg.get("fresh_clone", True),
+    )
+    return {"starter_sha": info.starter_sha,
+            "log": [f"clone: {cfg['starter_url']}@{info.starter_ref} "
+                    f"({info.starter_sha[:8]}) -> {info.path}"]}
+
+
+# =============================================================================
+# 4. Provision DB (deterministic) — drives the STARTER'S own pnpm scripts
+# =============================================================================
+def provision_db(state: S) -> dict:
+    """
+    Postgres in Docker via the starter's `pnpm db:up`, then install, then
+    `db:reset` (drop + re-migrate + re-seed 3 demo users).
+
+    Two-layer seeding:
+      Layer 1 (here)  the template's demo users -> identity for E2E login
+      Layer 2 (tests) domain fixtures created per-test in its arrange step
+    Global domain seeds are deliberately avoided: shared mutable state across
+    tests creates order-dependence, and scenarios like SC-001 assert on an
+    EMPTY starting state.
+    """
+    cfg, slug = state["cfg"], repo_mod.slugify(state["cfg"]["project_slug"])
+    api_port, web_port = infra.allocate_ports(
+        cfg.get("api_port", 3001), cfg.get("web_port", 3000))
+    stack = infra.Stack(
+        project_slug=slug,
+        api_port=api_port,
+        web_port=web_port,
+        compose_project=f"pf-{slug}",
+    )
+    infra.write_env(state["repo_path"], stack,
+                    cfg.get("jwt_secret", "factory-local-dev-secret-not-for-production"))
+    infra.db_up(state["repo_path"], stack)
+    infra.install(state["repo_path"])
+    infra.reset_db(state["repo_path"], stack)
+    return {"stack": stack,
+            "log": [f"db: postgres up (compose project factory-{slug}), "
+                    f"reset + template users seeded; api:{api_port} web:{web_port}"]}
+
+
+def baseline(state: S) -> dict:
+    """Starter must build green BEFORE we generate — makes failures attributable."""
+    r = state["repo_path"]
+    for cmd in (["pnpm", "check-types"], ["pnpm", "build"]):
+        p = subprocess.run(cmd, cwd=r, capture_output=True, text=True, timeout=2400)
+        if p.returncode != 0:
+            raise RuntimeError(f"starter not green ({' '.join(cmd)}):\n{p.stdout[-2000:]}")
+    return {"log": ["baseline: starter type-checks and builds green"]}
+
+
+def commit_specs(state: S) -> dict:
+    """
+    Copy the project's specs INTO the generated repo.
+
+    Source of truth is <workspace>/<slug>/specs/; the repo gets a committed copy
+    so it is self-contained — visible in the PR diff and auditable a year later
+    without the factory present.
+    """
+    repo_mod.commit_spec_artifacts(
+        state["repo_path"], state["board_path"], state["scenarios_path"])
+    repo_mod.create_branch(state["repo_path"], f"feat/{state['slice_id']}")
+    return {"log": [f"specs copied into repo; branch feat/{state['slice_id']}"]}
+
+
+# =============================================================================
+# 5. Architect (AGENT — Opus)
+# =============================================================================
+def architect(state: S) -> dict:
+    sc = state["scenarios"]
+    ids = {t for s in sc["scenarios"] for t in s["traces_to"]}
+    relevant = [e for e in state["ir"]["events"] if e["id"] in ids]
+    out = claude(
+        "architect",
+        "Design the data + API contract for ONE vertical slice of an existing "
+        "NestJS + Prisma + Next.js monorepo. Follow the repo's conventions and "
+        "match the existing reference module exactly. Invent no new structural "
+        "patterns.\n\n"
+        f"Aggregates: {sc['aggregates']}\n\n"
+        f"Domain events:\n{json.dumps(relevant, indent=1)[:6000]}\n\n"
+        f"API scenarios the contract must satisfy:\n"
+        f"{yaml.safe_dump(sc['scenarios'], sort_keys=False)[:3500]}\n\n"
+        f"Web scenarios (screens that will consume it):\n"
+        f"{yaml.safe_dump(sc.get('web_scenarios', []), sort_keys=False)[:1500]}\n\n"
+        "Output exactly two fenced blocks, nothing else:\n"
+        "```prisma\n<models>\n```\n```yaml\n<OpenAPI paths + schemas>\n```",
+        cwd=state["repo_path"], usage=state["usage"], budget_usd=_budget(state),
+    )
+    return {"contract": out, "log": ["architect: contract drafted"]}
+
+
+def contract_lint(state: S) -> dict:
+    res = check_contract(state["contract"], state["scenarios"], state["repo_path"])
+    if not res.ok:
+        raise RuntimeError("contract invalid:\n" + "\n".join(res.errors))
+    return {"log": [f"contract_lint: ok ({res.summary})"]}
+
+
+def gate_contract(state: S) -> dict:
+    sc = state["scenarios"]
+    needs_schema_change = [
+        s["id"] for group in ("scenarios", "web_scenarios", "e2e_scenarios")
+        for s in sc.get(group, []) if s.get("depends_on_schema_change")
+    ]
+    d = interrupt({
+        "gate": "B — contract freeze",
+        "contract": state["contract"][:4000],
+        # Surfaced explicitly: these scenarios extend the STARTER's auth model
+        # (its User has no role field), so they are not a pure additive slice.
+        "extends_template_schema": needs_schema_change,
+        "starter_constraints": sc.get("starter_constraints", {}),
+        "ask": "Approve to freeze. Check the schema additions against the "
+               "starter's conventions before approving.",
+    })
+    return {"log": [f"gate_B: {d}"
+                    + (f" (schema-extending: {needs_schema_change})"
+                       if needs_schema_change else "")]}
+
+
+def migrate(state: S) -> dict:
+    """
+    Append the approved models to the starter's schema, then migrate.
+
+    We APPEND rather than overwrite: the starter's schema.prisma already holds
+    the generator, datasource, the `User` model that auth depends on, and the
+    convention comments. Replacing the file would silently delete auth's User
+    model — the fastest way to break a template that otherwise works.
+    """
+    import re
+    m = re.search(r"```prisma\n(.*?)```", state["contract"], re.S)
+    schema = pathlib.Path(state["repo_path"]) / "apps/api/prisma/schema.prisma"
+    if m:
+        existing = schema.read_text()
+        new_models = m.group(1).strip()
+        # Skip any model the Architect re-declared (e.g. User) — the starter wins.
+        keep: list[str] = []
+        for block in re.split(r"\n(?=model |enum )", new_models):
+            name = re.match(r"(?:model|enum)\s+(\w+)", block.strip())
+            if name and re.search(rf"^(model|enum)\s+{name.group(1)}\b",
+                                  existing, re.M):
+                continue
+            keep.append(block)
+        if keep:
+            schema.write_text(existing.rstrip() + "\n\n" + "\n\n".join(keep).strip() + "\n")
+
+    infra.migrate(state["repo_path"], state["stack"])
+    infra.seed_template_users(state["repo_path"], state["stack"])
+    repo_mod.commit(state["repo_path"],
+                    "feat(db): slice models + migration from approved contract")
+    return {"log": ["migrate: models appended, migration applied, users re-seeded"]}
+
+
+# =============================================================================
+# 6. Test Author (AGENT — Sonnet). Unit + E2E, committed FIRST, red.
+# =============================================================================
+def write_tests(state: S) -> dict:
+    sc, slug = state["scenarios"], state["scenarios"]["slice"]["id"]
+    claude(
+        "test_author",
+        "Write executable tests from approved scenarios. Two suites:\n"
+        f"  1. Vitest API integration tests -> apps/api/__tests__/{slug}/\n"
+        f"  2. Playwright E2E tests -> apps/web/__tests__/e2e/{slug}/\n\n"
+        "Rules: one test per scenario; put the scenario id in the test name; "
+        "assert exactly what the scenario states. Write NO implementation code. "
+        "Do NOT weaken assertions — these SHOULD fail now, because the feature "
+        "does not exist yet. Never use it.skip.\n\n"
+        f"Frozen contract:\n{state['contract'][:4500]}\n\n"
+        f"API scenarios:\n{yaml.safe_dump(sc['scenarios'], sort_keys=False)}\n\n"
+        f"Web scenarios:\n{yaml.safe_dump(sc.get('web_scenarios', []), sort_keys=False)}\n\n"
+        f"E2E scenarios:\n{yaml.safe_dump(sc.get('e2e_scenarios', []), sort_keys=False)}",
+        cwd=state["repo_path"],
+        write_scope=["apps/api/__tests__/**", "apps/web/__tests__/**"],
+        usage=state["usage"], budget_usd=_budget(state),
+    )
+    tr = check_traceability(state["repo_path"], sc)
+    if not tr.ok:
+        raise RuntimeError("traceability failed:\n" + "\n".join(tr.errors))
+    rf = check_red_first(state["repo_path"], slug)
+    if not rf.ok:
+        raise RuntimeError("red-first failed:\n" + "\n".join(rf.errors))
+    repo_mod.commit(state["repo_path"], f"test({slug}): scenarios as executable tests")
+    return {"log": [f"write_tests: {tr.summary}; red-first ok"]}
+
+
+# =============================================================================
+# 7. Implement / verify / diagnose — one helper, three phases
+# =============================================================================
+def _implement(state: S, phase: str, scope: list[str], instruction: str) -> dict:
+    n = state["attempts"].get(phase, 0)
+    fix = ""
+    if state["diagnosis"].get(phase):
+        fix = (f"\n\nPrevious attempt failed. Diagnosis:\n{state['diagnosis'][phase]}\n\n"
+               f"Authoritative failure output:\n{state['phase_out'].get(phase,'')[-3000:]}")
+    claude(
+        "implementer",
+        f"{instruction}\n\n"
+        "The tests are the specification and are READ-ONLY. Never edit, delete "
+        "or skip a test. Follow AGENTS.md and the repo skills. Match the "
+        "existing reference module's structure.\n\n"
+        f"Frozen contract:\n{state['contract'][:4500]}{fix}",
+        cwd=state["repo_path"], attempt=n, write_scope=scope, read_only=READ_ONLY,
+        usage=state["usage"], budget_usd=_budget(state),
+    )
+    scope_check = check_write_scope(state["repo_path"], READ_ONLY)
+    if not scope_check.ok:
+        raise RuntimeError("ORACLE VIOLATION — tests modified:\n"
+                           + "\n".join(scope_check.errors))
+    return {"attempts": {phase: n + 1}, "log": [f"{phase}: attempt {n + 1}"]}
+
+
+def implement_api(state: S) -> dict:
+    return _implement(state, "api", WRITE_API,
+                      "Implement the NestJS module (controller, service, "
+                      "repository, DTOs) so the API integration tests pass.")
+
+
+def implement_web(state: S) -> dict:
+    return _implement(state, "web", WRITE_WEB,
+                      "Implement the React/Next.js screen and its API client so "
+                      "the web unit tests pass. Use the repo's design system and "
+                      "existing UI components; keep it accessible.")
+
+
+def fix_e2e(state: S) -> dict:
+    return _implement(state, "e2e", WRITE_API + WRITE_WEB,
+                      "The full stack is running in Docker but E2E tests fail. "
+                      "Fix the integration between web and api.")
+
+
+def verify_api(state: S) -> dict:
+    # turbo filter, not a path — the starter's script is `turbo run test`
+    r = run_tests(state["repo_path"], workspace="@repo/api")
+    return {"phase_out": {"api": r.output},
+            "status": "green" if r.ok else "pending",
+            "log": [f"verify_api: {'PASS' if r.ok else 'FAIL'} ({r.summary})"]}
+
+
+def verify_web(state: S) -> dict:
+    r = run_tests(state["repo_path"], workspace="@repo/web")
+    return {"phase_out": {"web": r.output},
+            "status": "green" if r.ok else "pending",
+            "log": [f"verify_web: {'PASS' if r.ok else 'FAIL'} ({r.summary})"]}
+
+
+# =============================================================================
+# 8. Launch stack in Docker + E2E — 5) in your list
+# =============================================================================
+def launch_stack(state: S) -> dict:
+    summary = infra.launch_stack(state["repo_path"], state["stack"])
+    return {"log": [f"launch: {summary}"]}
+
+
+def verify_e2e(state: S) -> dict:
+    r = infra.run_e2e(state["repo_path"], state["stack"])
+    return {"phase_out": {"e2e": r.output},
+            "status": "green" if r.ok else "pending",
+            "log": [f"verify_e2e: {'PASS' if r.ok else 'FAIL'} ({r.summary})"]}
+
+
+def _diagnose(state: S, phase: str) -> dict:
+    out = claude(
+        "diagnostician",
+        "A generated slice fails its tests. Identify the root cause and give a "
+        "specific, minimal fix naming files and changes. Do not restate the "
+        "error. Never suggest changing the tests.\n\n"
+        f"Phase: {phase}\n\nFailure output:\n{state['phase_out'].get(phase,'')[-6000:]}\n\n"
+        f"Contract:\n{state['contract'][:2500]}",
+        cwd=state["repo_path"], usage=state["usage"], budget_usd=_budget(state),
+    )
+    return {"diagnosis": {phase: out}, "log": [f"diagnose[{phase}]: produced"]}
+
+
+def diagnose_api(state: S) -> dict:
+    return _diagnose(state, "api")
+
+
+def diagnose_web(state: S) -> dict:
+    return _diagnose(state, "web")
+
+
+def diagnose_e2e(state: S) -> dict:
+    return _diagnose(state, "e2e")
+
+
+def _router(phase: str, on_green: str):
+    def route(state: S) -> Literal["green", "retry", "park"]:
+        if state["status"] == "green":
+            return "green"
+        return "retry" if state["attempts"].get(phase, 0) < MAX_ATTEMPTS else "park"
+    route.__name__ = f"route_{phase}"
+    return route
+
+
+def park_api(state: S) -> dict:
+    return {"parked": ["api"], "log": ["PARKED api — escalate to human"]}
+
+
+def park_web(state: S) -> dict:
+    return {"parked": ["web"], "log": ["PARKED web — escalate to human"]}
+
+
+def park_e2e(state: S) -> dict:
+    return {"parked": ["e2e"], "log": ["PARKED e2e — escalate to human"]}
+
+
+# =============================================================================
+# 9. Finish
+# =============================================================================
+def teardown(state: S) -> dict:
+    if state["cfg"].get("keep_stack_running"):
+        return {"log": [f"stack left running for inspection: {state['stack'].web_url} "
+                        f"(sign in as john.doe@example.com)"]}
+    infra.teardown(state["repo_path"], state["stack"],
+                   keep_db=state["cfg"].get("keep_db", False))
+    return {"log": ["stack stopped, postgres down"]}
+
+
+def finish(state: S) -> dict:
+    slug = state["scenarios"]["slice"]["id"]
+    parked = state.get("parked", [])
+    repo_mod.commit(state["repo_path"], f"feat({slug}): generated slice")
+    pr = repo_mod.open_draft_pr(
+        state["repo_path"], f"feat/{slug}",
+        title=f"feat({slug}): generated slice",
+        body=(f"Generated by project-factory.\n\n"
+              f"- starter: {state['starter_sha'][:8]}\n"
+              f"- attempts: {state['attempts']}\n"
+              f"- parked: {parked or 'none'}\n"
+              f"- cost: ${state['usage'].cost_usd:.2f}\n"
+              f"- by agent: {json.dumps({k: round(v,3) for k,v in state['usage'].by_agent.items()})}\n"),
+        remote=state["cfg"].get("git_remote"),
+    )
+    return {"status": "parked" if parked else "green", "log": [f"pr: {pr}"]}
+
+
+def gate_pr(state: S) -> dict:
+    d = interrupt({
+        "gate": "C — PR review",
+        "status": state["status"], "parked": state.get("parked", []),
+        "attempts": state["attempts"],
+        "cost_usd": round(state["usage"].cost_usd, 2),
+        "by_agent": {k: round(v, 3) for k, v in state["usage"].by_agent.items()},
+        "ask": "Review the Draft PR; merge or push fixes.",
+    })
+    return {"log": [f"gate_C: {d}"]}
+
+
+# =============================================================================
+# Graph
+# =============================================================================
+def build_graph(checkpointer=None, interrupt_after: list[str] | None = None):
+    """
+    interrupt_after powers `run --until <node>`: the graph pauses after that node
+    and the checkpoint holds everything, so a later `run` (or `approve`) resumes
+    from exactly there. This is what makes the cheap-first ladder possible —
+    prove clone+build for $0 before spending anything on generation.
+    """
+    g = StateGraph(S)
+    nodes = [
+        ("ingest", ingest), ("gap_detect", gap_detect), ("gate_spec", gate_spec),
+        ("clone_starter", clone_starter), ("provision_db", provision_db),
+        ("baseline", baseline), ("commit_specs", commit_specs),
+        ("architect", architect), ("contract_lint", contract_lint),
+        ("gate_contract", gate_contract), ("migrate", migrate),
+        ("write_tests", write_tests),
+        ("implement_api", implement_api), ("verify_api", verify_api),
+        ("diagnose_api", diagnose_api), ("park_api", park_api),
+        ("implement_web", implement_web), ("verify_web", verify_web),
+        ("diagnose_web", diagnose_web), ("park_web", park_web),
+        ("launch_stack", launch_stack), ("verify_e2e", verify_e2e),
+        ("fix_e2e", fix_e2e), ("diagnose_e2e", diagnose_e2e), ("park_e2e", park_e2e),
+        ("teardown", teardown), ("finish", finish), ("gate_pr", gate_pr),
+    ]
+    for name, fn in nodes:
+        g.add_node(name, fn)
+
+    chain = ["ingest", "gap_detect", "gate_spec", "clone_starter", "provision_db",
+             "baseline", "commit_specs", "architect", "contract_lint",
+             "gate_contract", "migrate", "write_tests", "implement_api"]
+    g.add_edge(START, chain[0])
+    for a, b in zip(chain, chain[1:]):
+        g.add_edge(a, b)
+
+    # api loop
+    g.add_edge("implement_api", "verify_api")
+    g.add_conditional_edges("verify_api", _router("api", "implement_web"),
+                            {"green": "implement_web", "retry": "diagnose_api",
+                             "park": "park_api"})
+    g.add_edge("diagnose_api", "implement_api")
+    g.add_edge("park_api", "implement_web")
+
+    # web loop
+    g.add_edge("implement_web", "verify_web")
+    g.add_conditional_edges("verify_web", _router("web", "launch_stack"),
+                            {"green": "launch_stack", "retry": "diagnose_web",
+                             "park": "park_web"})
+    g.add_edge("diagnose_web", "implement_web")
+    g.add_edge("park_web", "launch_stack")
+
+    # e2e loop against the live docker stack
+    g.add_edge("launch_stack", "verify_e2e")
+    g.add_conditional_edges("verify_e2e", _router("e2e", "teardown"),
+                            {"green": "teardown", "retry": "diagnose_e2e",
+                             "park": "park_e2e"})
+    g.add_edge("diagnose_e2e", "fix_e2e")
+    g.add_edge("fix_e2e", "verify_e2e")
+    g.add_edge("park_e2e", "teardown")
+
+    g.add_edge("teardown", "finish")
+    g.add_edge("finish", "gate_pr")
+    g.add_edge("gate_pr", END)
+    return g.compile(checkpointer=checkpointer,
+                     interrupt_after=interrupt_after or [])
+
+
+# NODE_ORDER and LADDER live in config.py, which does NOT import langgraph — so
+# `run --until <bad node>` and `--dry-run` stay usable on a checkout that only
+# has pyyaml installed. Re-exported here for convenience.
+from .config import LADDER, NODE_ORDER  # noqa: E402,F401
+
+
+# Entry point lives in __main__.py so paths are resolved by discovery:
+#   python -m project_factory run <slug>

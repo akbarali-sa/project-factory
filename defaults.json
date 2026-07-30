@@ -1,0 +1,28 @@
+{
+  "_comment": "Factory-wide defaults — true for EVERY project. Per-project run.json overrides only what differs. This file is what makes project #2 nearly free.",
+
+  "_starter": "Your hardened fork is the default starter for every project. PIN starter_ref to a TAG once the branch stabilises — a moving branch means two runs a week apart are not the same experiment.",
+  "starter_url": "https://github.com/akbarali-sa/turborepo-starter-kit.git",
+  "starter_ref": "starter-minimal",
+  "fresh_clone": true,
+
+  "_workspace": "Omit to use the default: a 'projects' directory alongside the project-factory repo. Override here, or per-invocation with PROJECT_FACTORY_WORKSPACE / --workspace.",
+  "workspace_root": null,
+
+  "_ports": "api/web run as local processes (the starter ships no Dockerfiles). Ports auto-increment if busy, so parallel projects do not collide.",
+  "api_port": 3001,
+  "web_port": 3000,
+
+  "_checkpoint": "LangGraph checkpoints — our own Postgres on 5433, separate from every project DB.",
+  "checkpoint_db_url": "postgresql://root:123456@localhost:5433/project_factory_state",
+
+  "_budget": "Circuit breaker per run. Measured cost is reported at Gate C — that number is what replaces guesswork.",
+  "budget_usd": 25.0,
+
+  "_dev": "keep_stack_running leaves api+web up after a run so you can click through the app (sign in as john.doe@example.com). keep_db leaves Postgres up for pnpm db:studio.",
+  "keep_stack_running": true,
+  "keep_db": true,
+
+  "jwt_secret": "project-factory-local-dev-secret-not-for-production",
+  "git_remote": null
+}

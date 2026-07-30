@@ -1,0 +1,58 @@
+# =============================================================================
+# OPTIONAL — NOT USED BY SLICE 1. Do not wire this in yet.
+# =============================================================================
+#
+# The starter (akbarali-sa/turborepo-starter-kit @ starter-minimal) ships a
+# Postgres compose at apps/api/database/docker-compose.yml and has NO Dockerfile
+# for api or web. For slice 1 we therefore:
+#
+#   * run Postgres in Docker via the starter's own `pnpm db:up`
+#   * run api + web as local processes (`start-server-and-test` is already a
+#     devDependency of the starter)
+#   * run Playwright against those real HTTP endpoints
+#
+# The oracle strength is identical — E2E still exercises web -> api -> Postgres
+# for real. What we skip is a container-build side-quest that de-risks nothing
+# about the factory itself.
+#
+# -----------------------------------------------------------------------------
+# WHEN YOU DO WANT CONTAINERISED APPS (later, e.g. for CI parity)
+# -----------------------------------------------------------------------------
+# You must first solve pnpm-workspace container builds. The known traps:
+#
+#   1. Use `turbo prune --docker --scope=@repo/api` to produce a minimal context.
+#      Copying the whole monorepo into the image is slow and busts layer caching.
+#   2. Platform-specific binaries: lightningcss, oxlint and the Prisma query
+#      engines are compiled per-arch. NEVER bind-mount host node_modules into a
+#      container — arm64 (your M-series) vs amd64 in the image will break at
+#      runtime in confusing ways. Install inside the image.
+#   3. `prisma generate` must run in the image after install, and
+#      `prisma migrate deploy` must run before the API boots.
+#   4. Next.js needs `output: 'standalone'` for a small runtime image.
+#   5. Pin base images by digest, not tag, for real reproducibility.
+#
+# Sketch only — the Dockerfiles referenced here do not exist in the starter yet:
+#
+# services:
+#   api:
+#     build:
+#       context: .
+#       dockerfile: apps/api/Dockerfile      # <- you must write this
+#     environment:
+#       DATABASE_URL: postgresql://root:123456@db:5432/${DB_NAME}?schema=public
+#       TZ: UTC
+#     depends_on:
+#       db: { condition: service_healthy }
+#
+#   web:
+#     build:
+#       context: .
+#       dockerfile: apps/web/Dockerfile      # <- you must write this
+#     environment:
+#       NEXT_PUBLIC_API_URL: http://api:3001
+#       TZ: UTC
+#     depends_on:
+#       api: { condition: service_healthy }
+#
+# Until those Dockerfiles exist and are green in CI, factory/infra.py
+# deliberately ignores this file.

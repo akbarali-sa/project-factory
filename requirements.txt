@@ -1,0 +1,16 @@
+# Project Factory dependencies.
+#
+# Pinned with >= on minor so a fresh clone resolves consistently; tighten to ==
+# once you have a run you want to reproduce exactly.
+
+# discovery/config only — enough for: doctor, list, new, run --dry-run
+pyyaml>=6.0
+
+# orchestration + durable checkpointing — needed for an actual run
+langgraph>=0.2.60
+langgraph-checkpoint-postgres>=2.0.0
+psycopg[binary]>=3.2
+
+# NOTE: no anthropic SDK. Every agent goes through the Claude Code CLI
+# (`claude -p ... --model ...`), which bills your subscription. Keep
+# ANTHROPIC_API_KEY UNSET — preflight() fails the run if it is set.
