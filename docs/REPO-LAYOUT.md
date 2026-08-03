@@ -29,9 +29,8 @@ One **blocking gap** the branch surfaced: the `User` model is `id, email, name, 
 ~/dev/
 ├── project-factory/                  the tool — its own git repo
 │   ├── project_factory/              graph · config · infra · repo · harness · models
-│   ├── docker/
-│   │   └── docker-compose.state.yml  checkpoint Postgres (:5433)
-│   ├── defaults.json                 true for EVERY project
+│   ├── docker/                       optional app-stack compose (not the DB)
+│   ├── defaults.json                 true for EVERY project — incl. shared postgres
 │   └── .cache/starter.git            bare mirror of your fork   (gitignored)
 │
 └── projects/                         SIBLING — never inside the factory
@@ -172,8 +171,8 @@ pip install langgraph langgraph-checkpoint-postgres pyyaml "psycopg[binary]"
 # Claude Code on subscription login — keep ANTHROPIC_API_KEY UNSET
 claude setup-token
 
-# 1. checkpoint DB (agent state, :5433)
-docker compose -f docker/docker-compose.state.yml up -d
+# 1. ONE shared Postgres for every local project (pgvector-based, :5432,
+#    postgres/postgres by default — see defaults.json) must already be running
 
 # 2. toolchain + env check (Node >= 24, pnpm 11.x, docker, claude, no API key)
 python -m project_factory doctor

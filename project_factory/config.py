@@ -6,8 +6,8 @@ THE LAYOUT (workspace lives OUTSIDE the factory, deliberately)
     ~/dev/
     ├── project-factory/            the tool — its own git repo
     │   ├── project_factory/        this package
-    │   ├── docker/                 checkpoint DB compose
-    │   └── defaults.json           true for EVERY project
+    │   ├── docker/                 optional app-stack compose (not the DB)
+    │   └── defaults.json           true for EVERY project — incl. shared postgres
     └── projects/                   sibling; never inside the factory
         └── barcode-mvp/
             ├── run.json            per-project OVERRIDES only
@@ -86,8 +86,12 @@ BUILT_IN_DEFAULTS: dict[str, Any] = {
     "keep_stack_running": True,
     "keep_db": True,
     "jwt_secret": "project-factory-local-dev-secret-not-for-production",
+    "db_host": "localhost",
+    "db_port": 5432,
+    "db_user": "postgres",
+    "db_password": "postgres",
     "checkpoint_db_url":
-        "postgresql://root:123456@localhost:5433/project_factory_state",
+        "postgresql://postgres:postgres@localhost:5432/project_factory_state",
     "git_remote": None,
 }
 

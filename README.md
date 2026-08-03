@@ -29,7 +29,11 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 claude setup-token          # subscription login; keep ANTHROPIC_API_KEY UNSET
-docker compose -f docker/docker-compose.state.yml up -d    # checkpoint DB :5433
+
+# ONE shared Postgres instance for every local project — this factory's own
+# checkpoints AND every generated app's DB, each its own database, no
+# per-project containers. See defaults.json (db_host/db_port/db_user/
+# db_password) if yours isn't the standard postgres:5432/postgres:postgres.
 
 python -m project_factory doctor
 ```
@@ -85,8 +89,8 @@ impossible to commit client code into this repo.
 ~/dev/
 ├── project-factory/            this repo
 │   ├── project_factory/        config · graph · models · infra · repo · harness
-│   ├── docker/                 checkpoint postgres
-│   ├── defaults.json           true for EVERY project
+│   ├── docker/                 optional app-stack compose (not the DB)
+│   ├── defaults.json           true for EVERY project — incl. shared postgres
 │   └── .cache/starter.git      bare mirror of the starter (gitignored)
 └── projects/                   sibling
     └── barcode-mvp/

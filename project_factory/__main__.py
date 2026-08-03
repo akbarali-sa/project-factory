@@ -45,8 +45,7 @@ def _open_app(project, interrupt_after=None):
 
     from .graph import build_graph
 
-    conn = infra.ensure_state_db(
-        str(cfgmod.factory_root()), project.cfg["checkpoint_db_url"])
+    conn = infra.ensure_state_db(project.cfg["checkpoint_db_url"])
     cm = PostgresSaver.from_conn_string(conn)
     saver = cm.__enter__()
     saver.setup()
@@ -142,9 +141,12 @@ def _cmd_doctor(args) -> int:
         return 1
     print(f"workspace   {cfgmod.resolve_workspace(args.workspace)}")
     print(f"factory     {cfgmod.factory_root()}")
-    compose = cfgmod.factory_root() / infra.STATE_COMPOSE
-    print(f"state db    {'ok' if compose.exists() else 'MISSING ' + str(compose)}")
-    return 0 if compose.exists() else 1
+    cfg = {**cfgmod.BUILT_IN_DEFAULTS, **cfgmod._load_defaults()}
+    host, port = cfg["db_host"], cfg["db_port"]
+    reachable = infra.postgres_reachable(host, port)
+    print(f"postgres    {'ok' if reachable else 'UNREACHABLE'} at {host}:{port} "
+          f"(one shared instance for every local project — see defaults.json)")
+    return 0 if reachable else 1
 
 
 def _cmd_status(args) -> int:

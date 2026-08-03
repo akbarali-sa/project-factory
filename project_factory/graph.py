@@ -11,14 +11,15 @@ Project Factory — full first-slice pipeline (LangGraph, Python).
   -> launch_stack(det, docker) -> verify_e2e(det, playwright) --fail--> diagnose+
   -> teardown(det) -> commit -> open Draft PR -> [GATE C] -> END
 
-Checkpointing: local Postgres (docker/docker-compose.state.yml, port 5433), so
+Checkpointing: a `project_factory_state` database on the ONE shared Postgres
+instance every local project uses (see defaults.json: db_host/db_port/...), so
 every agent step is durable and a killed run resumes exactly where it stopped.
 The thread_id is derived as <slug>:<slice_id>, so resume is automatic.
 
 Paths are never guessed here — the CLI resolves them via config.discover().
 
 Run:
-  docker compose -f docker/docker-compose.state.yml up -d
+  # ensure your shared Postgres (pgvector-based, see defaults.json) is running
   python -m project_factory run <slug>
 """
 
@@ -193,7 +194,11 @@ def provision_db(state: S) -> dict:
         project_slug=slug,
         api_port=api_port,
         web_port=web_port,
-        compose_project=f"pf-{slug}",
+        db_name=slug.replace("-", "_"),
+        db_host=cfg.get("db_host", "localhost"),
+        db_port=cfg.get("db_port", 5432),
+        db_user=cfg.get("db_user", "postgres"),
+        db_password=cfg.get("db_password", "postgres"),
     )
     infra.write_env(state["repo_path"], stack,
                     cfg.get("jwt_secret", "factory-local-dev-secret-not-for-production"))
@@ -201,8 +206,9 @@ def provision_db(state: S) -> dict:
     infra.install(state["repo_path"])
     infra.reset_db(state["repo_path"], stack)
     return {"stack": stack,
-            "log": [f"db: postgres up (compose project factory-{slug}), "
-                    f"reset + template users seeded; api:{api_port} web:{web_port}"]}
+            "log": [f"db: database '{stack.db_name}' on shared postgres "
+                    f"{stack.db_host}:{stack.db_port}, reset + template users "
+                    f"seeded; api:{api_port} web:{web_port}"]}
 
 
 def baseline(state: S) -> dict:
