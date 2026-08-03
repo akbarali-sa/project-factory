@@ -231,7 +231,19 @@ def install(repo: str) -> None:
     _run(["pnpm", "install", "--frozen-lockfile"], cwd=repo, timeout=2400)
 
 
-def reset_db(repo: str, stack: Stack) -> None:
+def _consent_env(consent: str | None) -> dict:
+    """
+    Prisma's CLI detects it's being invoked by an AI agent and refuses to run a
+    destructive command (migrate reset, and sometimes migrate dev when it would
+    reset) without PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION set to the exact
+    text of the human's consent message. `consent` must come from a human who
+    reviewed and approved it for THIS project (config.py's db_reset_consent) —
+    never invent or default this value.
+    """
+    return {"PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION": consent} if consent else {}
+
+
+def reset_db(repo: str, stack: Stack, consent: str | None = None) -> None:
     """
     Deterministic starting state: drop + re-migrate + re-seed.
 
@@ -239,12 +251,14 @@ def reset_db(repo: str, stack: Stack) -> None:
     starts from an identical database, so a test failure is about the code, never
     about leftover rows from the previous attempt.
     """
-    _run(["pnpm", "db:reset"], cwd=repo, env={"TZ": "UTC"}, timeout=900)
+    _run(["pnpm", "db:reset"], cwd=repo,
+         env={"TZ": "UTC", **_consent_env(consent)}, timeout=900)
 
 
-def migrate(repo: str, stack: Stack) -> None:
+def migrate(repo: str, stack: Stack, consent: str | None = None) -> None:
     """Create + apply a migration for the Architect's approved schema."""
-    _run(["pnpm", "db:migrate"], cwd=repo, env={"TZ": "UTC"}, timeout=900)
+    _run(["pnpm", "db:migrate"], cwd=repo,
+         env={"TZ": "UTC", **_consent_env(consent)}, timeout=900)
     _run(["pnpm", "db:generate"], cwd=repo, env={"TZ": "UTC"}, timeout=600)
 
 

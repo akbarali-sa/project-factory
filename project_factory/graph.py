@@ -204,7 +204,7 @@ def provision_db(state: S) -> dict:
                     cfg.get("jwt_secret", "factory-local-dev-secret-not-for-production"))
     infra.db_up(state["repo_path"], stack)
     infra.install(state["repo_path"])
-    infra.reset_db(state["repo_path"], stack)
+    infra.reset_db(state["repo_path"], stack, cfg.get("db_reset_consent"))
     return {"stack": stack,
             "log": [f"db: database '{stack.db_name}' on shared postgres "
                     f"{stack.db_host}:{stack.db_port}, reset + template users "
@@ -315,7 +315,7 @@ def migrate(state: S) -> dict:
         if keep:
             schema.write_text(existing.rstrip() + "\n\n" + "\n\n".join(keep).strip() + "\n")
 
-    infra.migrate(state["repo_path"], state["stack"])
+    infra.migrate(state["repo_path"], state["stack"], state["cfg"].get("db_reset_consent"))
     infra.seed_template_users(state["repo_path"], state["stack"])
     repo_mod.commit(state["repo_path"],
                     "feat(db): slice models + migration from approved contract")
