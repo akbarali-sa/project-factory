@@ -365,10 +365,16 @@ def run_e2e(repo: str, stack: Stack, grep: str | None = None) -> E2EResult:
     cmd = ["pnpm", "test:e2e"]
     if grep:
         cmd += ["--", "--grep", grep]
+    # playwright.config.ts reads NEXT_PUBLIC_WEB_URL/NEXT_PUBLIC_API_URL (not
+    # BASE_URL/API_URL) to decide whether a server is already running and
+    # should be reused. Passing the wrong names means it never recognizes the
+    # servers launch_stack() already started, so it tries to boot its own
+    # redundant copies — which then time out against config.webServer.
     p = subprocess.run(
         cmd, cwd=repo, capture_output=True, text=True, timeout=2400,
-        env={**os.environ, "TZ": "UTC", "BASE_URL": stack.web_url,
-             "API_URL": stack.api_url},
+        env={**os.environ, "TZ": "UTC",
+             "NEXT_PUBLIC_WEB_URL": stack.web_url,
+             "NEXT_PUBLIC_API_URL": stack.api_url},
     )
     out = (p.stdout or "") + (p.stderr or "")
     if p.returncode != 0:

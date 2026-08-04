@@ -3,3 +3,8 @@ __pycache__/
 .venv/
 .DS_Store
 *.pyc
+
+# local Claude Code tooling — machine-specific, not part of the codebase
+.claude/settings.local.json
+.claude/skills/find-skills/
+skills-lock.json
