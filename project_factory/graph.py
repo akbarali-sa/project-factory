@@ -293,10 +293,13 @@ def migrate(state: S) -> dict:
     """
     Append the approved models to the starter's schema, then migrate.
 
-    We APPEND rather than overwrite: the starter's schema.prisma already holds
-    the generator, datasource, the `User` model that auth depends on, and the
-    convention comments. Replacing the file would silently delete auth's User
-    model — the fastest way to break a template that otherwise works.
+    New models are appended; a model the Architect RE-DECLARES (e.g. `User`,
+    to add `role`) REPLACES the existing block rather than being discarded.
+    Gate B exists specifically to review and approve exactly that kind of
+    change — silently keeping the starter's old version instead would defeat
+    the gate and leave the schema missing whatever field Gate B approved
+    (and any relation elsewhere that references it, e.g. a back-relation on
+    `User` for a new model's foreign key).
     """
     import re
     m = re.search(r"```prisma\n(.*?)```", state["contract"], re.S)
@@ -304,16 +307,20 @@ def migrate(state: S) -> dict:
     if m:
         existing = schema.read_text()
         new_models = m.group(1).strip()
-        # Skip any model the Architect re-declared (e.g. User) — the starter wins.
-        keep: list[str] = []
         for block in re.split(r"\n(?=model |enum )", new_models):
-            name = re.match(r"(?:model|enum)\s+(\w+)", block.strip())
-            if name and re.search(rf"^(model|enum)\s+{name.group(1)}\b",
-                                  existing, re.M):
+            block = block.strip()
+            name = re.match(r"(?:model|enum)\s+(\w+)", block)
+            if not name:
                 continue
-            keep.append(block)
-        if keep:
-            schema.write_text(existing.rstrip() + "\n\n" + "\n\n".join(keep).strip() + "\n")
+            existing_block = re.search(
+                rf"^(?:model|enum)\s+{name.group(1)}\b[^\n]*\{{.*?\n\}}\n?",
+                existing, re.M | re.S)
+            if existing_block:
+                existing = (existing[:existing_block.start()] + block + "\n"
+                            + existing[existing_block.end():])
+            else:
+                existing = existing.rstrip() + "\n\n" + block + "\n"
+        schema.write_text(existing)
 
     infra.migrate(state["repo_path"], state["stack"], state["cfg"].get("db_reset_consent"))
     infra.seed_template_users(state["repo_path"], state["stack"])
