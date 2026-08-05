@@ -5,7 +5,7 @@ WHY THIS FILE GOT SIMPLER
     The starter (akbarali-sa/turborepo-starter-kit @ starter-minimal) already
     ships everything we were about to rebuild:
 
-        pnpm db:up        docker compose -f apps/api/database/docker-compose.yml up -d
+        pnpm db:up        confirms the shared Postgres (see below) is reachable
         pnpm db:migrate   prisma migrate (creates + applies)
         pnpm db:deploy    prisma migrate deploy (CI/prod path)
         pnpm init-db      seeds 3 demo users
@@ -16,17 +16,28 @@ WHY THIS FILE GOT SIMPLER
     Rule: never reimplement what the starter already does. Every custom
     equivalent is a thing that silently drifts from the template.
 
-WHY api/web ARE NOT IN DOCKER (for slice 1)
-    The starter has NO Dockerfile for api or web — only the Postgres compose.
-    Adding them means solving pnpm-workspace container builds (`turbo prune`,
-    platform-specific binaries like lightningcss and the Prisma engines). That
-    is a real side-quest that de-risks nothing about the FACTORY.
+ONE SHARED POSTGRES, NOT A CONTAINER PER PROJECT
+    Every local project — this factory's own checkpoints, every generated
+    app's DB, unrelated local tools — talks to the SAME already-running
+    Postgres instance (pgvector-based; db_host/db_port/db_user/db_password in
+    defaults.json), each in its own DATABASE namespaced by project slug.
+    `db_up`/`db_down` in this file own creating/dropping that database
+    (`CREATE DATABASE`/`DROP DATABASE` via psycopg); the starter's own
+    `db:up` script just confirms reachability over DATABASE_URL. Spinning up
+    a dedicated container per project was the old design — it fragments a
+    laptop into N slightly-different Postgres images/containers for no
+    benefit, since Postgres already isolates by database.
 
-    So: Postgres runs in Docker (exactly as the template intends), and api+web
-    run as local processes via `start-server-and-test`, which the starter already
-    has as a devDependency. E2E hits real HTTP against a real Postgres — the
-    oracle strength is identical. Containerising the apps is a later, optional
-    step (see docker/docker-compose.app.yml).
+WHY api/web ARE NOT IN DOCKER (for slice 1)
+    The starter has NO Dockerfile for api or web. Adding them means solving
+    pnpm-workspace container builds (`turbo prune`, platform-specific binaries
+    like lightningcss and the Prisma engines). That is a real side-quest that
+    de-risks nothing about the FACTORY.
+
+    So: api+web run as local processes via `start-server-and-test`, which the
+    starter already has as a devDependency. E2E hits real HTTP against the
+    real shared Postgres — the oracle strength is identical. Containerising
+    the apps is a later, optional step (see docker/docker-compose.app.yml).
 """
 
 from __future__ import annotations
@@ -38,11 +49,9 @@ import socket
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-
-STATE_COMPOSE = "docker/docker-compose.state.yml"
-STARTER_DB_COMPOSE = "apps/api/database/docker-compose.yml"
 
 # Pin the toolchain the starter declares (engines.node >= 24, pnpm 11.15.1).
 # A different pnpm major resolves the lockfile differently -> non-reproducible.
@@ -50,12 +59,29 @@ EXPECTED_PNPM_MAJOR = 11
 MIN_NODE_MAJOR = 24
 
 
+def _ensure_database(admin_conn_url: str, dbname: str) -> None:
+    """CREATE DATABASE if missing, on the ONE shared Postgres instance every
+    local project uses. Lazy import: infra.py must stay importable without
+    psycopg installed (dry-run works on a pyyaml-only checkout)."""
+    import psycopg
+
+    with psycopg.connect(admin_conn_url, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_database WHERE datname=%s", (dbname,))
+            if not cur.fetchone():
+                cur.execute(f'CREATE DATABASE "{dbname}"')
+
+
 @dataclass
 class Stack:
     project_slug: str
     api_port: int
     web_port: int
-    compose_project: str          # COMPOSE_PROJECT_NAME -> isolates containers
+    db_name: str
+    db_host: str = "localhost"
+    db_port: int = 5432
+    db_user: str = "postgres"
+    db_password: str = "postgres"
 
     @property
     def api_url(self) -> str:
@@ -64,6 +90,18 @@ class Stack:
     @property
     def web_url(self) -> str:
         return f"http://localhost:{self.web_port}"
+
+    @property
+    def database_url(self) -> str:
+        return (f"postgresql://{self.db_user}:{self.db_password}@"
+                f"{self.db_host}:{self.db_port}/{self.db_name}?schema=public")
+
+    @property
+    def admin_url(self) -> str:
+        """Connects to the shared server's own `postgres` maintenance db —
+        needed to CREATE/DROP the project's database by name."""
+        return (f"postgresql://{self.db_user}:{self.db_password}@"
+                f"{self.db_host}:{self.db_port}/postgres")
 
 
 def _run(cmd: list[str], cwd: str | None = None, timeout: int = 900,
@@ -112,6 +150,16 @@ def _free(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) != 0
 
 
+def postgres_reachable(host: str, port: int, timeout: float = 3.0) -> bool:
+    """Is the ONE shared Postgres instance (see defaults.json) up? We never
+    start/stop it ourselves — it's expected to already be running."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def allocate_ports(base_api: int, base_web: int) -> tuple[int, int]:
     out = []
     for base in (base_api, base_web):
@@ -125,21 +173,20 @@ def allocate_ports(base_api: int, base_web: int) -> tuple[int, int]:
 
 
 # -----------------------------------------------------------------------------
-# Factory-state Postgres (LangGraph checkpoints) — our own, port 5433
+# Factory-state Postgres (LangGraph checkpoints) — a DATABASE on the shared
+# instance, not a dedicated container.
 # -----------------------------------------------------------------------------
-def ensure_state_db(factory_root: str, conn: str) -> str:
-    _run(["docker", "compose", "-f", STATE_COMPOSE, "up", "-d"], cwd=factory_root)
-    for _ in range(45):
-        if _run(["docker", "exec", "project-factory-state", "pg_isready",
-                 "-U", "root", "-d", "project_factory_state"], check=False,
-                timeout=30).returncode == 0:
-            return conn
-        time.sleep(1)
-    raise RuntimeError("project-factory-state postgres never became ready")
+def ensure_state_db(conn_url: str) -> str:
+    parsed = urllib.parse.urlsplit(conn_url)
+    dbname = parsed.path.lstrip("/")
+    admin_url = urllib.parse.urlunsplit(parsed._replace(path="/postgres"))
+    _ensure_database(admin_url, dbname)
+    return conn_url
 
 
 # -----------------------------------------------------------------------------
-# Project app DB — the starter's compose, namespaced per project
+# Project app DB — its own DATABASE on the same shared instance, namespaced
+# per project by name (not by container).
 # -----------------------------------------------------------------------------
 def write_env(repo: str, stack: Stack, jwt_secret: str) -> None:
     """
@@ -162,6 +209,7 @@ def write_env(repo: str, stack: Stack, jwt_secret: str) -> None:
         "TZ": "UTC",
         "JWT_SECRET": jwt_secret,
         "PORT": "3001",
+        "DATABASE_URL": stack.database_url,
     }
     kept = [l for l in lines if l.split("=")[0].strip() not in over and l.strip()]
     api_env.write_text("\n".join(kept + [f"{k}={v}" for k, v in over.items()]) + "\n")
@@ -173,28 +221,29 @@ def write_env(repo: str, stack: Stack, jwt_secret: str) -> None:
 
 
 def db_up(repo: str, stack: Stack) -> None:
-    """Start Postgres using the STARTER'S compose, namespaced per project."""
-    env = {"COMPOSE_PROJECT_NAME": stack.compose_project}
-    _run(["pnpm", "db:up"], cwd=repo, env=env, timeout=600)
-
-    # Wait on the container the starter's compose created.
-    for _ in range(60):
-        p = _run(["docker", "compose", "-f", STARTER_DB_COMPOSE, "ps", "-q"],
-                 cwd=repo, env=env, check=False, timeout=60)
-        cid = (p.stdout or "").strip().splitlines()
-        if cid:
-            hp = _run(["docker", "exec", cid[0], "pg_isready"], check=False, timeout=30)
-            if hp.returncode == 0:
-                return
-        time.sleep(1)
-    raise RuntimeError("project postgres never became ready")
+    """Create the project's database on the shared instance (idempotent), then
+    let the starter's own db:up confirm it can reach it via DATABASE_URL."""
+    _ensure_database(stack.admin_url, stack.db_name)
+    _run(["pnpm", "db:up"], cwd=repo, timeout=60)
 
 
 def install(repo: str) -> None:
     _run(["pnpm", "install", "--frozen-lockfile"], cwd=repo, timeout=2400)
 
 
-def reset_db(repo: str, stack: Stack) -> None:
+def _consent_env(consent: str | None) -> dict:
+    """
+    Prisma's CLI detects it's being invoked by an AI agent and refuses to run a
+    destructive command (migrate reset, and sometimes migrate dev when it would
+    reset) without PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION set to the exact
+    text of the human's consent message. `consent` must come from a human who
+    reviewed and approved it for THIS project (config.py's db_reset_consent) —
+    never invent or default this value.
+    """
+    return {"PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION": consent} if consent else {}
+
+
+def reset_db(repo: str, stack: Stack, consent: str | None = None) -> None:
     """
     Deterministic starting state: drop + re-migrate + re-seed.
 
@@ -202,26 +251,30 @@ def reset_db(repo: str, stack: Stack) -> None:
     starts from an identical database, so a test failure is about the code, never
     about leftover rows from the previous attempt.
     """
-    env = {"COMPOSE_PROJECT_NAME": stack.compose_project, "TZ": "UTC"}
-    _run(["pnpm", "db:reset"], cwd=repo, env=env, timeout=900)
+    _run(["pnpm", "db:reset"], cwd=repo,
+         env={"TZ": "UTC", **_consent_env(consent)}, timeout=900)
 
 
-def migrate(repo: str, stack: Stack) -> None:
+def migrate(repo: str, stack: Stack, consent: str | None = None) -> None:
     """Create + apply a migration for the Architect's approved schema."""
-    env = {"COMPOSE_PROJECT_NAME": stack.compose_project, "TZ": "UTC"}
-    _run(["pnpm", "db:migrate"], cwd=repo, env=env, timeout=900)
-    _run(["pnpm", "db:generate"], cwd=repo, env=env, timeout=600)
+    _run(["pnpm", "db:migrate"], cwd=repo,
+         env={"TZ": "UTC", **_consent_env(consent)}, timeout=900)
+    _run(["pnpm", "db:generate"], cwd=repo, env={"TZ": "UTC"}, timeout=600)
 
 
 def seed_template_users(repo: str, stack: Stack) -> None:
     """Layer 1 seed: the starter's 3 demo users (identity for E2E login)."""
-    env = {"COMPOSE_PROJECT_NAME": stack.compose_project, "TZ": "UTC"}
-    _run(["pnpm", "init-db:force"], cwd=repo, env=env, timeout=600)
+    _run(["pnpm", "init-db:force"], cwd=repo, env={"TZ": "UTC"}, timeout=600)
 
 
 def db_down(repo: str, stack: Stack) -> None:
-    _run(["pnpm", "db:down"], cwd=repo, check=False,
-         env={"COMPOSE_PROJECT_NAME": stack.compose_project}, timeout=300)
+    """Drop the project's database from the shared instance — there is no
+    per-project container to stop."""
+    import psycopg
+
+    with psycopg.connect(stack.admin_url, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f'DROP DATABASE IF EXISTS "{stack.db_name}"')
 
 
 # -----------------------------------------------------------------------------
@@ -250,7 +303,6 @@ def launch_stack(repo: str, stack: Stack) -> str:
     of "it worked on my laptop" flakiness.
     """
     env = {**os.environ, "TZ": "UTC",
-           "COMPOSE_PROJECT_NAME": stack.compose_project,
            "PORT": str(stack.api_port),
            "NEXT_PUBLIC_API_URL": stack.api_url}
 
@@ -313,11 +365,16 @@ def run_e2e(repo: str, stack: Stack, grep: str | None = None) -> E2EResult:
     cmd = ["pnpm", "test:e2e"]
     if grep:
         cmd += ["--", "--grep", grep]
+    # playwright.config.ts reads NEXT_PUBLIC_WEB_URL/NEXT_PUBLIC_API_URL (not
+    # BASE_URL/API_URL) to decide whether a server is already running and
+    # should be reused. Passing the wrong names means it never recognizes the
+    # servers launch_stack() already started, so it tries to boot its own
+    # redundant copies — which then time out against config.webServer.
     p = subprocess.run(
         cmd, cwd=repo, capture_output=True, text=True, timeout=2400,
-        env={**os.environ, "TZ": "UTC", "BASE_URL": stack.web_url,
-             "API_URL": stack.api_url,
-             "COMPOSE_PROJECT_NAME": stack.compose_project},
+        env={**os.environ, "TZ": "UTC",
+             "NEXT_PUBLIC_WEB_URL": stack.web_url,
+             "NEXT_PUBLIC_API_URL": stack.api_url},
     )
     out = (p.stdout or "") + (p.stderr or "")
     if p.returncode != 0:

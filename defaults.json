@@ -13,8 +13,14 @@
   "api_port": 3001,
   "web_port": 3000,
 
-  "_checkpoint": "LangGraph checkpoints — our own Postgres on 5433, separate from every project DB.",
-  "checkpoint_db_url": "postgresql://root:123456@localhost:5433/project_factory_state",
+  "_postgres": "ONE shared Postgres for every local project (this factory's checkpoints AND every generated app's DB) — no per-project containers. Point this at whatever pgvector-based instance you already run for local dev.",
+  "db_host": "localhost",
+  "db_port": 5432,
+  "db_user": "postgres",
+  "db_password": "postgres",
+
+  "_checkpoint": "LangGraph checkpoints live in their own DATABASE (not container) on the shared instance above.",
+  "checkpoint_db_url": "postgresql://postgres:postgres@localhost:5432/project_factory_state",
 
   "_budget": "Circuit breaker per run. Measured cost is reported at Gate C — that number is what replaces guesswork.",
   "budget_usd": 25.0,

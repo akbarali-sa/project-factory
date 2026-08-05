@@ -21,6 +21,7 @@ run means something.
 from __future__ import annotations
 
 import ast
+import os
 import pathlib
 import re
 import subprocess
@@ -35,8 +36,10 @@ class Result:
     errors: list[str] = field(default_factory=list)
 
 
-def _run(cmd: list[str], cwd: str, timeout: int = 900) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+def _run(cmd: list[str], cwd: str, timeout: int = 900,
+         env: dict | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                          timeout=timeout, env={**os.environ, **(env or {})} if env else None)
 
 
 # -----------------------------------------------------------------------------
@@ -203,13 +206,30 @@ def check_contract(contract: str, scenarios: dict, repo: str) -> Result:
         base = pathlib.Path(repo) / "apps/api/prisma/schema.prisma"
         header = ""
         if base.exists():
-            header = "\n".join(
-                l for l in base.read_text().splitlines()
-                if l.strip().startswith(("generator", "datasource", "  ", "}"))
-            )
+            # generator/datasource have no nested braces, so a non-greedy
+            # match is safe and — unlike a line-prefix filter — never
+            # mistakes an indented field in some *other* model for part of
+            # these two blocks.
+            blocks = re.findall(r"(?:generator|datasource)\s+\w+\s*\{[^}]*\}",
+                                base.read_text())
+            header = "\n\n".join(blocks)
         tmp = pathlib.Path(td) / "schema.prisma"
         tmp.write_text(header + "\n" + prisma.group(1))
-        p = _run(["npx", "prisma", "validate", f"--schema={tmp}"], repo, timeout=180)
+
+        # The temp schema lives outside the repo, so Prisma's own .env
+        # discovery (relative to the schema path / cwd) won't find the
+        # project's real apps/api/.env — read DATABASE_URL from it directly
+        # rather than relying on that discovery.
+        db_url = ""
+        api_env = pathlib.Path(repo) / "apps/api/.env"
+        if api_env.exists():
+            for line in api_env.read_text().splitlines():
+                if line.startswith("DATABASE_URL="):
+                    db_url = line.split("=", 1)[1].strip().strip('"')
+                    break
+
+        p = _run(["npx", "prisma", "validate", f"--schema={tmp}"], repo, timeout=180,
+                 env={"DATABASE_URL": db_url} if db_url else None)
         if p.returncode != 0:
             errors.append(f"prisma validate failed: {(p.stdout + p.stderr)[-800:]}")
 
