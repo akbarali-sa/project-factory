@@ -16,6 +16,24 @@ re-deriving anything here from scratch.
 
 ## The standard runbook
 
+0. **Always start and show the dashboard first.** Every slice run (new,
+   resume, or debug session) begins by making sure the live fleet dashboard
+   is up on **http://localhost:8420/** and visible to the user:
+   - Check if it's already listening: `curl -sf http://localhost:8420/ >/dev/null`
+     (or `lsof -iTCP:8420 -sTCP:LISTEN`).
+   - If not, start it. In Claude Code, use the browser preview tools with the
+     `dashboard` entry from `.claude/launch.json` (never a raw Bash background
+     process); from a plain terminal it's:
+     ```bash
+     .venv/bin/uvicorn dashboard.app:app --port 8420
+     ```
+     run from the factory root.
+   - Then open (or reload, if already open) http://localhost:8420/ in the
+     browser pane so the user is looking at the **latest** state — after a
+     resume or a code change to `dashboard/`, reload rather than trusting a
+     stale tab.
+   The dashboard is the primary "is it still running?" view during the long
+   silent phases below — keep it open for the whole run.
 1. `source .venv/bin/activate`, then `python -m project_factory doctor` —
    catches missing tools/wrong versions before you spend anything.
 2. `python -m project_factory new <slug> --board <path> --slice-name <name>`
@@ -63,7 +81,9 @@ slow down and check before concluding anything is broken.
 calls over large prompts — several minutes with zero terminal output is
 expected, not evidence of a hang.
 
-Before you conclude a run is stuck, check both of these:
+First glance at the dashboard (http://localhost:8420/ — step 0 of the
+runbook should already have it open; reload it to get the latest state).
+Then, before you conclude a run is stuck, check both of these:
 
 **1. Is there actually a live process?**
 ```bash
