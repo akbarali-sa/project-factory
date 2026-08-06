@@ -21,8 +21,11 @@ BILLING NOTE (matters for your setup)
 from __future__ import annotations
 
 import json
+import pathlib
 import subprocess
 from dataclasses import dataclass, field
+
+from . import livelog
 
 # -----------------------------------------------------------------------------
 # Current-generation Claude models (as of July 2026).
@@ -99,6 +102,71 @@ class BudgetExceeded(RuntimeError):
     """Circuit breaker — abort the run rather than burn the ceiling."""
 
 
+def _summarize_stream_event(evt: dict) -> str | None:
+    """One human-readable line for a stream-json event, or None to skip it
+    (thinking-token counters, tool_result echoes, etc. are noise for a live
+    tail). `result` events are handled by the caller, not here."""
+    if evt.get("type") != "assistant":
+        return None
+    parts: list[str] = []
+    for block in (evt.get("message") or {}).get("content") or []:
+        kind = block.get("type")
+        if kind == "text" and block.get("text", "").strip():
+            first_line = block["text"].strip().splitlines()[0]
+            parts.append(first_line[:160])
+        elif kind == "tool_use":
+            name = block.get("name", "?")
+            inp = block.get("input") or {}
+            detail = (inp.get("file_path") or inp.get("path") or inp.get("command")
+                      or inp.get("pattern") or inp.get("query") or "")
+            parts.append(f"→ {name}({str(detail)[:100]})" if detail else f"→ {name}")
+    return "  ".join(parts) if parts else None
+
+
+def _claude_streaming(cmd: list[str], cwd: str | None, timeout: int,
+                      agent: str, model: str, attempt: int,
+                      log_path: pathlib.Path) -> dict:
+    """
+    Same contract as the plain `--output-format json` call — returns the
+    final result payload — but tees every tool call and reasoning line to
+    `log_path` AS THEY HAPPEN, instead of the caller seeing nothing until
+    the whole (often minutes-long) call returns.
+    """
+    livelog.append(log_path, f"▶ {agent} ({model}, attempt {attempt + 1}) — starting")
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    result: dict | None = None
+    try:
+        for raw in livelog.iter_lines_with_timeout(proc, timeout):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                evt = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if evt.get("type") == "result":
+                result = evt
+                continue
+            summary = _summarize_stream_event(evt)
+            if summary:
+                livelog.append(log_path, summary)
+    finally:
+        proc.wait(timeout=5)
+
+    if result is None:
+        raise RuntimeError(f"claude[{agent}] produced no result event (exit={proc.returncode})")
+    if result.get("is_error"):
+        livelog.append(log_path, f"✗ {agent} failed: {str(result.get('result',''))[:300]}")
+        raise RuntimeError(f"claude[{agent}] failed: {result.get('result')}")
+    livelog.append(
+        log_path,
+        f"✓ {agent} done in {result.get('duration_ms', 0) / 1000:.0f}s "
+        f"(${result.get('total_cost_usd', 0):.3f})",
+    )
+    return result
+
+
 def claude(
     agent: str,
     prompt: str,
@@ -110,6 +178,7 @@ def claude(
     write_scope: list[str] | None = None,
     read_only: list[str] | None = None,
     timeout: int = 1800,
+    log_path: pathlib.Path | None = None,
 ) -> str:
     """
     Invoke Claude Code headless for `agent`, returning its text result.
@@ -119,6 +188,10 @@ def claude(
                 instead of calling the raw API)
     write_scope paths the agent may modify, e.g. ["apps/api/src/**"]
     read_only   paths it must NOT modify, e.g. ["**/tests/**"] -- the oracle guard
+    log_path    when given, streams tool calls + reasoning to this file as they
+                happen (see livelog.py) instead of blocking silently until the
+                whole call returns — this is what the dashboard's "Live CLI"
+                panel tails.
 
     NOTE: verify flag names against `claude --help`; the CLI surface evolves.
     We also audit writes after the fact in graph.py (belt and braces) because a
@@ -128,11 +201,10 @@ def claude(
     if budget_usd is not None and usage is not None and usage.cost_usd >= budget_usd:
         raise BudgetExceeded(f"run budget ${budget_usd} reached before {agent}")
 
-    cmd = [
-        "claude", "-p", prompt,
-        "--output-format", "json",
-        "--model", CLI_ALIAS[model_for(agent, attempt)],
-    ]
+    model = model_for(agent, attempt)
+    cmd = ["claude", "-p", prompt, "--model", CLI_ALIAS[model]]
+    cmd += (["--output-format", "stream-json", "--verbose"] if log_path is not None
+            else ["--output-format", "json"])
 
     # Only the Implementer touches the filesystem; reasoning agents stay read-only.
     if write_scope:
@@ -142,13 +214,14 @@ def claude(
     for pattern in (read_only or []):
         cmd += ["--disallowedTools", f"Edit({pattern})", "--disallowedTools", f"Write({pattern})"]
 
-    proc = subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"claude[{agent}] failed: {proc.stderr or proc.stdout}")
+    if log_path is not None:
+        payload = _claude_streaming(cmd, cwd, timeout, agent, model, attempt, log_path)
+    else:
+        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        if proc.returncode != 0:
+            raise RuntimeError(f"claude[{agent}] failed: {proc.stderr or proc.stdout}")
+        payload = json.loads(proc.stdout)
 
-    payload = json.loads(proc.stdout)
     if usage is not None:
         usage.add(agent, payload)
         if budget_usd is not None and usage.cost_usd >= budget_usd:
@@ -156,4 +229,4 @@ def claude(
                 f"run budget ${budget_usd} exceeded after {agent} "
                 f"(spent ${usage.cost_usd:.2f})"
             )
-    return str(payload.get("result", proc.stdout)).strip()
+    return str(payload.get("result", "")).strip()

@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Project Factory — Live Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏭</text></svg>" />
+<link rel="stylesheet" href="/static/styles.css?v=2" />
+</head>
+<body>
+  <div class="page">
+    <div class="topbar">
+      <div class="brand">
+        <div class="logo">🏭</div>
+        <div>
+          <h1>Project Factory — Live Dashboard</h1>
+          <div class="subtitle">Reads the real LangGraph checkpoint. No mock data.</div>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span class="badge live" id="conn-badge">connecting…</span>
+        <button class="icon-btn" id="notify-btn" title="Enable browser notifications">🔔</button>
+        <button class="icon-btn" id="theme-btn" title="Toggle theme">🌙</button>
+      </div>
+    </div>
+
+    <div class="health-strip" id="health-strip"></div>
+
+    <!-- ===================== OVERVIEW ===================== -->
+    <div id="overview-view">
+      <div class="grid" style="margin-bottom:16px;">
+        <div class="card"><h2>Projects</h2><div class="stat" id="fleet-projects">0</div></div>
+        <div class="card"><h2>Slices tracked</h2><div class="stat" id="fleet-slices">0</div></div>
+        <div class="card"><h2>Gates pending</h2><div class="stat" id="fleet-gates">0</div></div>
+        <div class="card"><h2>Parked</h2><div class="stat" id="fleet-parked">0</div></div>
+        <div class="card"><h2>Total spend</h2><div class="stat" id="fleet-cost">$0.00</div></div>
+      </div>
+
+      <div class="control-row" style="margin-bottom:16px;">
+        <button class="btn btn-primary" id="new-project-btn">＋ New project</button>
+        <span class="meta" id="workspace-note"></span>
+      </div>
+
+      <div class="card hidden control-form" id="new-project-card" style="margin-bottom:16px;">
+        <h2>New project</h2>
+        <label class="form-label">Project slug (folder name in the workspace)</label>
+        <input id="np-slug" placeholder="e.g. barcode-mvp" />
+        <label class="form-label">Board file (a *.board.json from EventStorming)</label>
+        <div class="control-row" style="margin-bottom:4px;">
+          <button class="btn" id="np-board-pick">📂 Choose file…</button>
+          <span class="meta" id="np-board-file-name">no file selected</span>
+          <button class="btn hidden" id="np-board-clear">✕</button>
+          <input type="file" id="np-board-file" accept=".json,application/json" class="hidden" />
+        </div>
+        <label class="form-label">…or type a path on this machine</label>
+        <input id="np-board-path" placeholder="e.g. ~/Downloads/barcode-sorting-inventory-mvp.board.json" />
+        <label class="form-label">…or paste the board JSON directly</label>
+        <textarea id="np-board-json" placeholder='{"name": "...", "business_events": [...]}' style="min-height:80px;"></textarea>
+
+        <div id="np-slices" class="hidden">
+          <label class="form-label">Slices found in the board — pick which to scaffold</label>
+          <div class="meta" style="margin-bottom:6px;">
+            One seeded scenarios file per selection: scenario stubs prefilled from the board's events
+            (you author the given/when/then). All selected by default.
+          </div>
+          <div id="np-slices-list"></div>
+        </div>
+
+        <div id="np-fallback-slice">
+          <label class="form-label">First slice name (used only when the board yields no slices)</label>
+          <input id="np-slice-name" placeholder="e.g. container-packing-list" />
+        </div>
+
+        <label class="slice-candidate" style="margin-top:10px;">
+          <input type="checkbox" id="np-consent" />
+          <span><b>Allow destructive DB resets on this project's local dev database</b>
+            <span class="meta">Writes your consent into run.json: <code>prisma migrate reset --force</code>
+            destroys and recreates ALL data in the project's local development database on every run
+            (the factory's determinism lever). Required when runs are launched by an AI agent — Prisma's
+            safety guard blocks provision_db without it. Never point this at a production database.</span>
+          </span>
+        </label>
+        <div class="control-row">
+          <button class="btn btn-primary" id="np-create">Create project</button>
+          <button class="btn" id="np-cancel">Cancel</button>
+          <span class="meta" id="np-status"></span>
+        </div>
+        <div class="meta" style="margin-top:8px;">
+          Creates the folder and a <b>template</b> scenarios file. The scenarios are the
+          oracle — author them in the Specs editor before the first run.
+        </div>
+      </div>
+
+      <div class="overview-grid" id="overview-grid"></div>
+      <div class="empty-note hidden" id="overview-empty">
+        No projects in the workspace yet — click <b>＋ New project</b> above to create one.
+      </div>
+    </div>
+
+    <!-- ===================== DETAIL ===================== -->
+    <div id="detail-view" class="hidden">
+      <div class="detail-header">
+        <button class="link-btn" id="overview-btn">← Overview</button>
+        <div class="detail-title" id="detail-title"></div>
+        <div style="flex:1;"></div>
+        <select id="project-select"></select>
+        <select id="slice-select"></select>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <h2>Status</h2>
+          <div class="stat" id="status-stat">—</div>
+          <div class="meta" id="status-meta">Waiting for data…</div>
+        </div>
+        <div class="card">
+          <h2>Progress</h2>
+          <div class="stat" id="progress-stat">0%</div>
+          <div class="bar"><div class="bar-fill" id="progress-bar" style="width:0%"></div></div>
+        </div>
+        <div class="card">
+          <h2>Started</h2>
+          <div class="stat" id="started-stat">—</div>
+          <div class="meta" id="started-meta">—</div>
+        </div>
+        <div class="card">
+          <h2>Elapsed</h2>
+          <div class="stat" id="elapsed-stat">—</div>
+          <div class="meta" id="elapsed-meta">—</div>
+        </div>
+        <div class="card">
+          <h2>Cost</h2>
+          <div class="stat" id="cost-stat">$0.00</div>
+          <div class="meta" id="cost-meta">of $0 budget</div>
+          <div class="bar"><div class="bar-fill" id="cost-bar" style="width:0%"></div></div>
+          <div class="cost-agents" id="cost-agents"></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <h2>Pipeline control</h2>
+        <div id="control-panel"></div>
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <h2>Specs — the oracle</h2>
+        <div class="meta" style="margin-bottom:8px;">
+          Scenario files define exactly what the generated code must do; the pipeline's tests are derived
+          from them and are read-only to the implementer. Author them here before the first run.
+        </div>
+        <div class="control-row" style="margin-bottom:8px;">
+          <span id="spec-tabs"></span>
+          <span style="flex:1;"></span>
+          <button class="btn btn-primary" id="spec-save" disabled>Save</button>
+          <span class="meta" id="spec-status"></span>
+        </div>
+        <textarea id="spec-editor" class="spec-editor" spellcheck="false"
+                  placeholder="Select a spec file above…"></textarea>
+      </div>
+
+      <div class="card hidden" id="stack-card" style="margin-top:16px;">
+        <h2>Generated app</h2>
+        <div class="meta" id="stack-meta"></div>
+        <div class="stack-links" id="stack-links"></div>
+        <div class="meta" id="stack-repo"></div>
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <h2 style="display:flex; align-items:center; gap:8px;">
+          Live CLI — what's emitting right now
+          <span class="badge" id="live-badge" style="margin-left:auto; font-size:0.68rem;">idle</span>
+        </h2>
+        <div class="meta" style="margin-bottom:8px;">
+          Raw tool calls, reasoning and subprocess output as they happen — not the checkpoint, which only
+          updates once a whole step finishes. Only populated while a <code>python -m project_factory run</code>
+          process is actually executing this slice.
+        </div>
+        <div class="log-toolbar">
+          <input type="text" id="live-search" placeholder="Filter live output…" />
+          <label><input type="checkbox" id="live-autoscroll" checked /> autoscroll</label>
+          <button class="copy-btn" id="live-clear">Clear</button>
+        </div>
+        <div class="log" id="live-log"></div>
+      </div>
+
+      <div class="grid" style="grid-template-columns: 1.3fr 1fr; margin-top: 16px; align-items: start;">
+        <div class="card">
+          <h2>Pipeline phases</h2>
+          <ul class="phases" id="phases"></ul>
+        </div>
+
+        <div style="display:flex; flex-direction:column; gap:16px;">
+          <div class="card hidden" id="gate-card">
+            <h2>Pending gate</h2>
+            <div class="gate-panel" id="gate-panel"></div>
+          </div>
+          <div class="card">
+            <h2>Recent events (checkpoint)</h2>
+            <div class="log" id="log"></div>
+          </div>
+          <div class="card">
+            <h2>Full history (timestamped, searchable)</h2>
+            <div class="log-toolbar">
+              <input type="text" id="log-search" placeholder="Filter log…" />
+              <label><input type="checkbox" id="log-autoscroll" checked /> autoscroll</label>
+              <button class="copy-btn" id="log-copy">Copy</button>
+            </div>
+            <div class="log" id="activity-log"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script src="/static/app.js?v=2"></script>
+</body>
+</html>

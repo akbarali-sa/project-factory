@@ -33,6 +33,7 @@ import sys
 
 from . import config as cfgmod
 from . import infra
+from . import livelog
 
 
 # -----------------------------------------------------------------------------
@@ -214,7 +215,19 @@ def _cmd_approve(args) -> int:
                   "specs/contract, then re-run.")
         print(f"\nresuming with: {json.dumps(decision)}\n")
 
-        res = app.invoke(Command(resume=decision), thread)
+        # Same cfg refresh as _cmd_run's resume path: a human may have edited
+        # run.json while the slice sat at this gate.
+        app.update_state(thread, {"cfg": project.cfg})
+
+        try:
+            livelog.acquire_run_lock(str(project.dir), chosen.id, cmd=sys.argv)
+        except RuntimeError as e:
+            print(f"\n{e}", file=sys.stderr)
+            return 4
+        try:
+            res = app.invoke(Command(resume=decision), thread)
+        finally:
+            livelog.release_run_lock(str(project.dir), chosen.id)
 
         # It may pause again at the next gate.
         nxt2, payloads2 = _pending(app, thread)
@@ -289,8 +302,23 @@ def _cmd_run(args) -> int:
         }
         if nxt:
             print(f"\nresuming from checkpoint (was before {', '.join(nxt)})")
+            # The checkpoint holds the cfg AS OF the thread's first start.
+            # run.json is exactly where a human fixes things while a run sits
+            # paused (add db_reset_consent, raise budget_usd) — resuming with
+            # the stale checkpointed copy silently ignores those edits, which
+            # reads as "the fix didn't work". Refresh cfg from disk on every
+            # resume so the file a human just edited is the one that runs.
+            app.update_state(thread, {"cfg": project.cfg})
 
-        res = app.invoke(payload, thread)
+        try:
+            livelog.acquire_run_lock(str(project.dir), chosen.id, cmd=sys.argv)
+        except RuntimeError as e:
+            print(f"\n{e}", file=sys.stderr)
+            return 4
+        try:
+            res = app.invoke(payload, thread)
+        finally:
+            livelog.release_run_lock(str(project.dir), chosen.id)
 
         nxt2, payloads2 = _pending(app, thread)
         if nxt2:

@@ -326,6 +326,42 @@ out_of_scope: []
 """
 
 
+def seeded_scenarios_yaml(slice_id: str, name: str, wave: int,
+                          bounded_context: str, events: list[dict]) -> str:
+    """
+    A scenarios TEMPLATE seeded from the board: one scenario stub per
+    in-scope event of this bounded context, with id/title/traces_to
+    prefilled so authoring the oracle is filling in given/when/then —
+    not bookkeeping. Gate A still approves the authored content; seeding
+    changes where the typing starts, not who decides.
+    """
+    data = {
+        "slice": {
+            "id": slice_id, "name": name, "wave": wave,
+            "bounded_context": bounded_context,
+            "approved_by": None, "approved_at": None,
+        },
+        "aggregates": [],
+        "scenarios": [
+            {"id": f"SC-{i:03d}", "title": e["name"], "traces_to": [e["id"]],
+             "given": ["TODO"], "when": "TODO", "then": ["TODO"]}
+            for i, e in enumerate(events, start=1)
+        ],
+        "web_scenarios": [], "e2e_scenarios": [],
+        "provisional_scenarios": [], "out_of_scope": [],
+    }
+    header = (
+        "# Oracle artifact — human-authored, approved at Gate A.\n"
+        "# The Test Author converts these into executable tests. The Implementer may\n"
+        "# never edit this file or the tests derived from it.\n"
+        "#\n"
+        f"# Seeded from the board: one scenario stub per in-scope\n"
+        f"# '{bounded_context}' event. Fill in given/when/then for each;\n"
+        "# delete any stub you decide not to build in this slice.\n\n"
+    )
+    return header + yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+
+
 def scaffold(slug: str, board: str | None, workspace: str | None = None,
              slice_name: str | None = None) -> Project:
     ws = resolve_workspace(workspace)

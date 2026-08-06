@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard",
+      "runtimeExecutable": ".venv/bin/uvicorn",
+      "runtimeArgs": ["dashboard.app:app", "--port", "8420"],
+      "port": 8420
+    }
+  ]
+}
