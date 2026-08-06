@@ -128,6 +128,24 @@ def _cmd_new(args) -> int:
     print(f"  specs/     {p.board_path.name} + "
           f"{', '.join(s.path.name for s in p.slices)}")
     print("  run.json   overrides only")
+
+    # Db-reset consent is collected HERE, at scaffold time, so provision_db
+    # never stalls mid-run on Prisma's AI-agent guardrail. The decision stays
+    # a human one: --db-reset-consent is an explicit flag, and the interactive
+    # prompt defaults to No. See config.record_db_reset_consent.
+    consent = bool(args.db_reset_consent)
+    if not consent and sys.stdin.isatty():
+        print("\nEvery run resets this project's LOCAL DEV database "
+              "(prisma migrate reset --force — destroys all data in it).")
+        ans = input("Record your consent now so runs never pause on it? [y/N] ")
+        consent = ans.strip().lower() in ("y", "yes")
+    if consent:
+        if cfgmod.record_db_reset_consent(p):
+            print("  run.json   db_reset_consent recorded (dev DB "
+                  f"{p.slug.replace('-', '_')} only)")
+    else:
+        print("  note: no db_reset_consent — the first run will stop at "
+              "provision_db until you add it to run.json")
     print("\nNext: author the scenarios — this is the ORACLE, the highest-value "
           "work in the pipeline. Then:")
     print(f"  python -m project_factory run {args.slug} --dry-run")
@@ -381,6 +399,10 @@ def main(argv: list[str] | None = None) -> int:
     n.add_argument("slug")
     n.add_argument("--board", help="path to the presales *.board.json")
     n.add_argument("--slice-name", default="slice-001")
+    n.add_argument("--db-reset-consent", action="store_true",
+                   help="record consent for the destructive dev-DB reset "
+                        "(prisma migrate reset) in run.json now, instead of "
+                        "being prompted interactively / stopping mid-run")
     n.set_defaults(fn=_cmd_new)
 
     r = sub.add_parser("run", help="run (or resume) one slice")

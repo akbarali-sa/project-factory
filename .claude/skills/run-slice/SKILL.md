@@ -39,7 +39,12 @@ re-deriving anything here from scratch.
 2. `python -m project_factory new <slug> --board <path> --slice-name <name>`
    scaffolds the project. It only writes a **placeholder** scenarios.yaml if
    one doesn't already exist — it will never overwrite a real one you already
-   authored or copied in.
+   authored or copied in. On a TTY it also asks the human whether to record
+   `db_reset_consent` now (the human can pass `--db-reset-consent` up front);
+   collect it here, at the keyboard, or the first run will stop mid-pipeline
+   at `provision_db` on Prisma's AI-agent gate (see gotchas). An agent driving
+   `new` non-interactively must relay that question to the human — it must
+   never pass the flag on its own.
 3. If you're copying a hand-authored scenarios file into place, use a
    **single-line** `cp` command. A multi-line command with a trailing
    backslash continuation can get mis-pasted into some terminals (the
@@ -235,6 +240,12 @@ recorded explicitly in that project's own `run.json` as `db_reset_consent`
 (never in the shared `defaults.json`, which would silently apply to every
 future project without per-project review). If a run errors on this
 message, stop and ask the human for explicit consent before setting it.
+Both front doors collect this at project creation so runs never stall on it:
+CLI `new` prompts on a TTY (or takes `--db-reset-consent` from the human),
+and the dashboard's New Project dialog has the equivalent checkbox — both
+write the same canned text via `config.record_db_reset_consent()`. The
+mid-run stall should now only happen for projects scaffolded before this
+existed, or when the human declined at scaffold time.
 
 **A `contract_lint` failure with a suspiciously *empty* generator/datasource
 block** (e.g. "provider is missing" on a schema that clearly has one) means
