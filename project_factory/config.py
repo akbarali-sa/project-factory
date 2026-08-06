@@ -176,8 +176,31 @@ class Project:
         Derived, never hand-written. Same project + slice = same thread, so a
         killed run RESUMES automatically instead of depending on you
         remembering to reuse an id.
+
+        A GENERATION suffix (":g2", ":g3", …) is appended once a slice is
+        re-run from scratch — merge/append reducers in the graph state mean a
+        finished thread can never be cleanly restarted in place, so a fresh
+        run gets a fresh thread and the old one stays in the checkpoint DB
+        as the audit trail. Generation 1 keeps the bare id so existing
+        threads stay reachable.
         """
-        return f"{self.slug}:{slice_id}"
+        gen = self.thread_generation(slice_id)
+        base = f"{self.slug}:{slice_id}"
+        return base if gen <= 1 else f"{base}:g{gen}"
+
+    def thread_generation(self, slice_id: str) -> int:
+        return int(self.state.get("thread_generations", {}).get(slice_id, 1))
+
+    def bump_thread_generation(self, slice_id: str) -> int:
+        """Point this slice at a brand-new thread. Never deletes anything —
+        earlier generations remain in the checkpoint DB; decrement the value
+        in .factory/state.json by hand to point back at one."""
+        gens = dict(self.state.get("thread_generations", {}))
+        gens[slice_id] = self.thread_generation(slice_id) + 1
+        self.state["thread_generations"] = gens
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.state_file.write_text(json.dumps(self.state, indent=2) + "\n")
+        return gens[slice_id]
 
     def next_slice(self) -> Slice | None:
         """First slice not marked completed, in wave order."""

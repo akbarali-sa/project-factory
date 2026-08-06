@@ -287,6 +287,32 @@ def _cmd_run(args) -> int:
         # Resume an in-flight thread instead of starting over. Same project +
         # slice = same thread, so a killed run continues where it stopped.
         nxt, payloads = _pending(app, thread)
+
+        # A FINISHED thread must never be restarted in place: the graph's
+        # merge/append reducers (attempts, diagnosis, phase_out, parked, log)
+        # survive ingest's reset and poison the new run — stale attempt counts
+        # park phases early, stale diagnoses leak into fresh prompts. Start a
+        # new thread GENERATION instead; the old thread stays in the
+        # checkpoint DB for cost/attempt comparison across runs.
+        fresh = args.fresh
+        if not fresh and not nxt:
+            try:
+                fresh = bool(app.get_state(thread).values)
+            except Exception:  # noqa: BLE001 — no checkpoint yet: plain first run
+                fresh = False
+        if fresh:
+            if nxt:  # only reachable via an explicit --fresh
+                print(f"\n--fresh: abandoning thread paused before "
+                      f"{', '.join(nxt)} (kept in the checkpoint DB; "
+                      "decrement thread_generations in .factory/state.json "
+                      "to point back at it)")
+            gen = project.bump_thread_generation(chosen.id)
+            why = "--fresh" if args.fresh else "previous run already finished"
+            print(f"\nfresh run ({why}): thread generation g{gen} — earlier "
+                  "generations remain in the checkpoint DB")
+            thread = {"configurable": {"thread_id": project.thread_id(chosen.id)}}
+            nxt, payloads = [], []
+
         if nxt and payloads:
             print(f"\nthis slice is paused at a gate before {', '.join(nxt)} — "
                   f"approve it first:\n  python -m project_factory approve {args.slug}")
@@ -365,6 +391,11 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--until", metavar="NODE",
                    help="pause after NODE (cheap-first ladder: gap_detect, "
                         "baseline, provision_db, migrate, write_tests, …)")
+    r.add_argument("--fresh", action="store_true",
+                   help="start a new thread generation instead of resuming — "
+                        "automatic when the previous run finished; pass "
+                        "explicitly to abandon a paused/in-flight thread "
+                        "(old threads are kept in the checkpoint DB)")
     r.set_defaults(fn=_cmd_run)
 
     s = sub.add_parser("status", help="show where a slice is paused")
