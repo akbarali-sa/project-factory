@@ -1,16 +1,18 @@
 ---
 name: run-slice
-description: Operational runbook and troubleshooting playbook for running project_factory slices end to end (python -m project_factory new/run/status/approve). Use this whenever running, resuming, or debugging a project_factory slice run in this repo — especially when a run appears to hang, errors mid-pipeline, or you're unsure whether it's still working or genuinely stuck. Also consult it before approving Gate A/B/C, before touching prisma migrate/reset, or before assuming a slow step is broken.
+description: Operational runbook and troubleshooting playbook for running project_factory slices end to end (python -m project_factory new/run/status/approve). Use this whenever running, resuming, or debugging a project_factory slice run in this repo — especially when a run appears to hang, errors mid-pipeline, resumes after a laptop sleep/crash, or you're unsure whether it's still working or genuinely stuck. Also consult it before approving Gate A/B/C, before touching prisma migrate/reset, before trusting a printed cost figure across a resume, or before assuming a slow step (or a failed e2e) is what it claims to be.
 ---
 
 # Running a project_factory slice
 
 This is the field guide for actually *operating* project_factory day to day —
 not the pipeline's own logic (that's `project_factory/graph.py` and friends,
-already correct). It exists because a full first end-to-end slice run
+already correct). It exists because the first two full end-to-end slice runs
 surfaced a specific, recurring set of failure modes that cost far more time
 to diagnose than the actual pipeline work did. Read this before assuming
-something is broken.
+something is broken. Longer-form lessons live in the Obsidian vault
+(`factory vault`, see the global CLAUDE.md) — search it for the topic before
+re-deriving anything here from scratch.
 
 ## The standard runbook
 
@@ -114,6 +116,63 @@ ps aux | grep -E "prisma|schema-engine" | grep -v grep   # find every PID
 kill -9 <all of them>
 ```
 
+## Resuming after a laptop sleep or crash
+
+A run interrupted by sleep produces **three different artifacts** — triage
+them separately instead of retrying blindly:
+
+1. **`API Error: Connection closed mid-response`** on an agent call —
+   harmless. `run <slug>` resumes from the checkpoint; only the in-flight
+   node re-runs, and its partial file edits survive on disk so the retry is
+   faster.
+2. **A FAIL from a timer that expired during suspend** — Playwright's 120s
+   `config.webServer` wait fires "instantly" on wake because wall-clock
+   jumped hours. That failure is *not real*. Re-verify with a healthy stack
+   before believing it, and **never feed it to `diagnose_*`** — a $5 Opus
+   diagnosis of a stale timeout produces a plausible-but-wrong fix plan.
+3. **Servers that LISTEN but never answer** — the api/web processes from
+   `launch_stack` outlived their parent or wedged during suspend.
+   `verify_e2e` now self-heals this (`infra.ensure_stack` health-checks and
+   relaunches, killing only listeners owned by the project repo), and server
+   output goes to `$TMPDIR/project-factory-{api,web}.log` — `tail` those,
+   not the process. If a server is LISTENing, `curl` hangs forever, and the
+   process sits at ~0% CPU, that's the wedge signature.
+
+Also on every resume: the checkpoint holds `cfg` **as of thread start**; the
+CLI refreshes it from `run.json` on resume, but anything you script by hand
+against the checkpoint must do the same or silently ignore edits made while
+paused.
+
+## Recovering by hand — checkpoint surgery
+
+When you (the driver) have already done a pending node's work, don't pay for
+an agent re-run. `update_state(..., as_node=...)` writes a node's output as
+if it ran, and the graph routes onward:
+
+```python
+# continuing from the inspection snippet above
+app.update_state(thread, {"log": ["<what you did and why>"]}, as_node="fix_e2e")
+# next becomes verify_e2e — the stale pending diagnose_e2e never runs
+```
+
+Three proven patterns from real runs:
+
+* **Salvage a crashed node's good output** — e.g. the Test Author wrote all
+  tests but died at the commit step: fix the mechanical issue by hand, run
+  the node's own checks (`harness.check_traceability`, `check_red_first`),
+  commit, then `as_node="write_tests"` with the node's normal return shape.
+* **Skip a poisoned diagnosis** — pending `diagnose_*` whose `phase_out` is
+  a sleep artifact: `as_node="fix_<phase>"` reroutes straight to re-verify.
+* **Record an externally-verified result** — after proving the suite green
+  by hand, write `{"status": "green", "phase_out": {...}, "log": [...]}`
+  `as_node="verify_e2e"`.
+
+Corollary: when an *agent artifact* (not code) is wrong — e.g. the Architect
+described a schema change in comments instead of redeclaring the model —
+patch the artifact in state (`update_state(thread, {"contract": fixed})`),
+validate with the harness function the pending lint node uses, and resume.
+Re-running the validator is free; re-running the generator is not.
+
 ## Known gotchas and their fixes
 
 **Docker port collisions.** If other local Postgres containers already run
@@ -151,6 +210,47 @@ can silently reset to defaults across a checkpoint resume. Flag it rather
 than ignore it if accurate cumulative cost tracking across gate-pauses
 matters for a real budget-limited run — don't assume the printed
 "cost so far" is trustworthy across a resume without checking.
+
+**The cost counter undercounts across crashed nodes — by design of the
+checkpoint, not a bug you can fix at read time.** A node that raises loses
+its state update, *including* usage from an agent call that completed inside
+it. The first run's checkpoint said $21.57 when the breaker had tripped at
+$27.01 and the per-agent log lines summed to ~$35. Consequences: after any
+crash/resume the printed figure is a floor; the breaker can trip, then on
+resume the checkpointed counter is back under the cap and spends again.
+Ground truth is the live log:
+```bash
+grep -oE '\$[0-9]+\.[0-9]+\)' <project>/.factory/live/<slice>.log \
+  | tr -d '$)' | awk '{s+=$1} END {print s}'
+```
+
+**The red-first test commit uses `--no-verify` deliberately.** Red tests
+import modules that do not exist yet — that is the whole point — so the
+starter's pre-commit typecheck can never pass them. `write_tests` commits
+with `verify=False`; implementation commits keep the hook. Don't "fix" this
+by making the hook pass, and don't extend `--no-verify` to other commits.
+
+**Headless agents cannot run commands** (current limitation): every
+`pnpm`/`vitest`/server invocation inside a `claude -p` agent is denied by
+the sandbox, so implementers/diagnosticians work from static analysis only.
+Expect blind first attempts and budget accordingly until the allowed-tools
+fix lands in `models.py`'s `claude()`.
+
+**Starter-kit traps that break e2e in every generated project**
+(`turborepo-starter-kit@starter-minimal`, reference fixes in the barcode
+repo, commit `cfe3935`):
+1. `Login.test` compares the raw `{appName}` i18n template against the
+   rendered heading — always fails; compare the resolved string.
+2. The login form's demo prefill (`mark.s@example.com`, a WORKER) wins over
+   any `fill()` that lands before React hydrates — the test "signs in fine"
+   but *as the wrong user*, then admin-gated pages 404. WebKit/Mobile Safari
+   hit it every time. Sign-in helpers must verify the issued token's
+   identity and retry, not just wait for the post-login redirect.
+3. `pnpm db:reset` does not reliably seed — always chain
+   `pnpm init-db:force` or every login 401s afterwards.
+4. The API's JwtStrategy prefers the `jwt` cookie over the `Authorization`
+   Bearer header — client-side role checks must fetch with
+   `credentials: "omit"` or a stale cookie silently wins.
 
 ## Reviewing at a gate
 
