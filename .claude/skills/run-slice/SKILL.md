@@ -163,6 +163,27 @@ CLI refreshes it from `run.json` on resume, but anything you script by hand
 against the checkpoint must do the same or silently ignore edits made while
 paused.
 
+## Re-running a finished slice — thread generations
+
+A finished thread can never be cleanly restarted in place: the graph state's
+merge/append reducers mean `ingest`'s reset of `attempts`/`diagnosis`/
+`phase_out` is a no-op, and `parked`/`log` are never reset — so a naive
+rerun parks phases early (stale attempt counts vs `MAX_ATTEMPTS`) and
+injects the *previous* run's diagnosis into fresh implementer prompts.
+
+The CLI handles this with **thread generations**: `run` on a slice whose
+thread already finished automatically starts a new thread
+(`slug:slice_id:g2`, counter in `.factory/state.json` under
+`thread_generations`). Nothing is ever deleted — earlier generations stay
+in the checkpoint DB, so you can compare cost/attempts across reruns to
+measure factory maturity. `status`, `approve`, and the dashboard all follow
+the *latest* generation automatically.
+
+`run --fresh` forces a new generation explicitly — the only way to abandon
+a paused/in-flight thread (e.g. one poisoned by a sleep artifact) without
+checkpoint surgery. To point back at an abandoned generation, decrement the
+counter in `.factory/state.json` by hand.
+
 ## Recovering by hand — checkpoint surgery
 
 When you (the driver) have already done a pending node's work, don't pay for
