@@ -8,3 +8,7 @@ __pycache__/
 .claude/settings.local.json
 .claude/skills/find-skills/
 skills-lock.json
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+graft/
+graphify-out/
