@@ -53,6 +53,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
+from . import livelog
+
 # Pin the toolchain the starter declares (engines.node >= 24, pnpm 11.15.1).
 # A different pnpm major resolves the lockfile differently -> non-reproducible.
 EXPECTED_PNPM_MAJOR = 11
@@ -105,7 +107,16 @@ class Stack:
 
 
 def _run(cmd: list[str], cwd: str | None = None, timeout: int = 900,
-         check: bool = True, env: dict | None = None) -> subprocess.CompletedProcess:
+         check: bool = True, env: dict | None = None,
+         log_path: pathlib.Path | None = None) -> subprocess.CompletedProcess:
+    """
+    `log_path` streams stdout/stderr line-by-line to the slice's live log as
+    the process runs (see livelog.py) — without it, callers get the exact
+    same blocking-then-all-at-once behavior as before.
+    """
+    if log_path is not None:
+        return livelog.tee_subprocess(cmd, cwd=cwd, env=env, timeout=timeout,
+                                      check=check, log_path=log_path)
     p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
                        timeout=timeout, env={**os.environ, **(env or {})})
     if check and p.returncode != 0:
@@ -208,7 +219,13 @@ def write_env(repo: str, stack: Stack, jwt_secret: str) -> None:
         "NODE_ENV": "test",
         "TZ": "UTC",
         "JWT_SECRET": jwt_secret,
-        "PORT": "3001",
+        # The ALLOCATED port, never a literal: allocate_ports may have moved
+        # off the default because another project (or a stray process) holds
+        # it. Anything that reads .env instead of inheriting launch_stack's
+        # env — Playwright's spawned webServer, a human running `pnpm dev` —
+        # must agree with the port the factory actually launched on, or e2e
+        # spawns a second API that binds the wrong (possibly taken) port.
+        "PORT": str(stack.api_port),
         "DATABASE_URL": stack.database_url,
     }
     kept = [l for l in lines if l.split("=")[0].strip() not in over and l.strip()]
@@ -220,15 +237,15 @@ def write_env(repo: str, stack: Stack, jwt_secret: str) -> None:
     web_env.write_text("\n".join(wkept + [f"NEXT_PUBLIC_API_URL={stack.api_url}"]) + "\n")
 
 
-def db_up(repo: str, stack: Stack) -> None:
+def db_up(repo: str, stack: Stack, log_path: pathlib.Path | None = None) -> None:
     """Create the project's database on the shared instance (idempotent), then
     let the starter's own db:up confirm it can reach it via DATABASE_URL."""
     _ensure_database(stack.admin_url, stack.db_name)
-    _run(["pnpm", "db:up"], cwd=repo, timeout=60)
+    _run(["pnpm", "db:up"], cwd=repo, timeout=60, log_path=log_path)
 
 
-def install(repo: str) -> None:
-    _run(["pnpm", "install", "--frozen-lockfile"], cwd=repo, timeout=2400)
+def install(repo: str, log_path: pathlib.Path | None = None) -> None:
+    _run(["pnpm", "install", "--frozen-lockfile"], cwd=repo, timeout=2400, log_path=log_path)
 
 
 def _consent_env(consent: str | None) -> dict:
@@ -243,7 +260,8 @@ def _consent_env(consent: str | None) -> dict:
     return {"PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION": consent} if consent else {}
 
 
-def reset_db(repo: str, stack: Stack, consent: str | None = None) -> None:
+def reset_db(repo: str, stack: Stack, consent: str | None = None,
+            log_path: pathlib.Path | None = None) -> None:
     """
     Deterministic starting state: drop + re-migrate + re-seed.
 
@@ -252,19 +270,20 @@ def reset_db(repo: str, stack: Stack, consent: str | None = None) -> None:
     about leftover rows from the previous attempt.
     """
     _run(["pnpm", "db:reset"], cwd=repo,
-         env={"TZ": "UTC", **_consent_env(consent)}, timeout=900)
+         env={"TZ": "UTC", **_consent_env(consent)}, timeout=900, log_path=log_path)
 
 
-def migrate(repo: str, stack: Stack, consent: str | None = None) -> None:
+def migrate(repo: str, stack: Stack, consent: str | None = None,
+           log_path: pathlib.Path | None = None) -> None:
     """Create + apply a migration for the Architect's approved schema."""
     _run(["pnpm", "db:migrate"], cwd=repo,
-         env={"TZ": "UTC", **_consent_env(consent)}, timeout=900)
-    _run(["pnpm", "db:generate"], cwd=repo, env={"TZ": "UTC"}, timeout=600)
+         env={"TZ": "UTC", **_consent_env(consent)}, timeout=900, log_path=log_path)
+    _run(["pnpm", "db:generate"], cwd=repo, env={"TZ": "UTC"}, timeout=600, log_path=log_path)
 
 
-def seed_template_users(repo: str, stack: Stack) -> None:
+def seed_template_users(repo: str, stack: Stack, log_path: pathlib.Path | None = None) -> None:
     """Layer 1 seed: the starter's 3 demo users (identity for E2E login)."""
-    _run(["pnpm", "init-db:force"], cwd=repo, env={"TZ": "UTC"}, timeout=600)
+    _run(["pnpm", "init-db:force"], cwd=repo, env={"TZ": "UTC"}, timeout=600, log_path=log_path)
 
 
 def db_down(repo: str, stack: Stack) -> None:
@@ -293,6 +312,28 @@ def _wait_http(url: str, attempts: int = 90, delay: float = 2.0) -> bool:
 
 
 _processes: dict[str, subprocess.Popen] = {}
+_process_logs: dict[str, pathlib.Path] = {}
+
+
+def _spawn_app(name: str, cmd: list[str], repo: str, env: dict) -> subprocess.Popen:
+    """
+    Server stdout goes to a FILE, never a PIPE. Nothing drains these pipes for
+    the (long) lifetime of the servers, and once the ~64KB pipe buffer fills,
+    the child blocks on its next write — the server keeps LISTENing but never
+    answers another request. That wedge is exactly the opaque "Timed out
+    waiting from config.webServer" verify_e2e kept hitting once the api's
+    Prisma/request logging filled the buffer.
+    """
+    import tempfile
+
+    log = pathlib.Path(tempfile.gettempdir()) / f"project-factory-{name}.log"
+    _process_logs[name] = log
+    f = open(log, "w")
+    try:
+        return subprocess.Popen(cmd, cwd=repo, env=env,
+                                stdout=f, stderr=subprocess.STDOUT, text=True)
+    finally:
+        f.close()  # Popen dup'ed the fd; the child keeps writing
 
 
 def launch_stack(repo: str, stack: Stack) -> str:
@@ -307,36 +348,75 @@ def launch_stack(repo: str, stack: Stack) -> str:
            "NEXT_PUBLIC_API_URL": stack.api_url}
 
     stop_stack()
-    _processes["api"] = subprocess.Popen(
-        ["pnpm", "--filter=@repo/api", "dev"], cwd=repo, env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    _processes["api"] = _spawn_app("api", ["pnpm", "--filter=@repo/api", "dev"],
+                                   repo, env)
     if not _wait_http(f"{stack.api_url}/health") and not _wait_http(stack.api_url):
         raise RuntimeError("api never became healthy:\n" + tail("api"))
 
-    _processes["web"] = subprocess.Popen(
-        ["pnpm", "--filter=@repo/web", "dev"], cwd=repo,
-        env={**env, "PORT": str(stack.web_port)},
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    _processes["web"] = _spawn_app("web", ["pnpm", "--filter=@repo/web", "dev"],
+                                   repo, {**env, "PORT": str(stack.web_port)})
     if not _wait_http(stack.web_url):
         raise RuntimeError("web never became healthy:\n" + tail("web"))
 
     return f"api={stack.api_url} web={stack.web_url} (postgres in docker)"
 
 
+def _pids_listening(port: int) -> list[int]:
+    p = subprocess.run(["lsof", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
+                       capture_output=True, text=True)
+    return [int(x) for x in p.stdout.split()]
+
+
+def _owned_by_repo(pid: int, repo: str) -> bool:
+    """Does this pid's command line or cwd reference the project repo?"""
+    cmd = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                         capture_output=True, text=True).stdout
+    if repo in cmd:
+        return True
+    cwd = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                         capture_output=True, text=True).stdout
+    return repo in cwd
+
+
+def ensure_stack(repo: str, stack: Stack) -> str | None:
+    """
+    Health-check api+web and relaunch when either is down or wedged.
+
+    A run resumed after a crash or a laptop sleep reaches verify_e2e with
+    `launch_stack` long since checkpointed, but its processes dead — or worse,
+    suspend-damaged: still LISTENing on the port yet never answering a request,
+    which surfaces as Playwright's opaque "timed out waiting from
+    config.webServer". Only processes that verifiably belong to this project's
+    repo are killed; a foreign squatter on the port is a loud error instead.
+
+    Returns the relaunch summary, or None if the stack was already healthy.
+    """
+    if _wait_http(f"{stack.api_url}/health", attempts=1, delay=0) and \
+            _wait_http(stack.web_url, attempts=3, delay=2):
+        return None
+    for port in (stack.api_port, stack.web_port):
+        for pid in _pids_listening(port):
+            if _owned_by_repo(pid, repo):
+                try:
+                    os.kill(pid, 9)
+                except ProcessLookupError:
+                    pass
+            else:
+                raise RuntimeError(
+                    f"port {port} is held by a process not from this project "
+                    f"(pid {pid}) — refusing to kill it. Free the port and re-run.")
+    time.sleep(2)
+    return launch_stack(repo, stack)
+
+
 def tail(which: str, lines: int = 80) -> str:
-    p = _processes.get(which)
-    if not p or not p.stdout:
+    log = _process_logs.get(which)
+    if not log or not log.exists():
         return f"(no output captured for {which})"
-    out: list[str] = []
     try:
-        for _ in range(lines):
-            line = p.stdout.readline()
-            if not line:
-                break
-            out.append(line.rstrip())
-    except Exception:  # noqa: BLE001
-        pass
-    return "\n".join(out[-lines:])
+        return "\n".join(log.read_text(errors="replace").splitlines()[-lines:])
+    except OSError:
+        return f"(could not read log for {which})"
 
 
 def stop_stack() -> None:
@@ -357,7 +437,8 @@ class E2EResult:
     summary: str
 
 
-def run_e2e(repo: str, stack: Stack, grep: str | None = None) -> E2EResult:
+def run_e2e(repo: str, stack: Stack, grep: str | None = None,
+           log_path: pathlib.Path | None = None) -> E2EResult:
     """
     Playwright via the starter's own script. Pin the Playwright version in
     package.json or browser behaviour drifts between machines.
@@ -370,13 +451,14 @@ def run_e2e(repo: str, stack: Stack, grep: str | None = None) -> E2EResult:
     # should be reused. Passing the wrong names means it never recognizes the
     # servers launch_stack() already started, so it tries to boot its own
     # redundant copies — which then time out against config.webServer.
-    p = subprocess.run(
-        cmd, cwd=repo, capture_output=True, text=True, timeout=2400,
-        env={**os.environ, "TZ": "UTC",
-             "NEXT_PUBLIC_WEB_URL": stack.web_url,
-             "NEXT_PUBLIC_API_URL": stack.api_url},
-    )
-    out = (p.stdout or "") + (p.stderr or "")
+    env = {"TZ": "UTC", "NEXT_PUBLIC_WEB_URL": stack.web_url, "NEXT_PUBLIC_API_URL": stack.api_url}
+    if log_path is not None:
+        p = livelog.tee_subprocess(cmd, cwd=repo, env=env, timeout=2400,
+                                   check=False, log_path=log_path)
+    else:
+        p = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, timeout=2400,
+                           env={**os.environ, **env})
+    out = (p.stdout or "") + (getattr(p, "stderr", "") or "")
     if p.returncode != 0:
         out += "\n\n--- api process output ---\n" + tail("api")
     return E2EResult(p.returncode == 0, out, f"exit={p.returncode}")

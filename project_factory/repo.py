@@ -126,10 +126,17 @@ def commit_spec_artifacts(repo: str, board_path: str, scenarios_path: str,
           "commit", "-m", "docs(specs): board IR + approved scenarios"], cwd=repo)
 
 
-def commit(repo: str, message: str) -> None:
+def commit(repo: str, message: str, verify: bool = True) -> None:
+    """
+    verify=False skips the starter's pre-commit hook. Only the red-first test
+    commit may use it: those tests import modules that DO NOT EXIST YET by
+    design, so no typecheck hook can ever pass them. Implementation commits
+    must keep the hook — green code has no such excuse.
+    """
     _run(["git", "add", "-A"], cwd=repo)
     p = _run(["git", "-c", "user.name=project-factory", "-c", "user.email=project-factory@local",
-              "commit", "-m", message], cwd=repo, check=False)
+              "commit", "-m", message] + ([] if verify else ["--no-verify"]),
+             cwd=repo, check=False)
     if p.returncode != 0 and "nothing to commit" not in (p.stdout + p.stderr):
         raise RuntimeError(f"commit failed:\n{p.stdout}{p.stderr}")
 

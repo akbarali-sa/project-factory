@@ -27,14 +27,14 @@ from __future__ import annotations
 
 import json
 import pathlib
-import subprocess
 from typing import Annotated, Any, Literal, TypedDict
 
 import yaml
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from . import config, infra, repo as repo_mod
+from . import config, infra, livelog
+from . import repo as repo_mod
 from .harness import (
     check_contract,
     check_red_first,
@@ -90,12 +90,21 @@ def _budget(state: S) -> float:
     return float(state["cfg"].get("budget_usd", 25.0))
 
 
+def _log_path(state: S):
+    """Where the dashboard's live-CLI tail reads from — see livelog.py."""
+    return livelog.path_for(state["project_dir"], state["slice_id"])
+
+
 # =============================================================================
 # 1. Ingest (deterministic)
 # =============================================================================
 def ingest(state: S) -> dict:
     # Paths come from discovery (config.py), not from run.json — the CLI resolves
     # them and passes them in, so nothing here needs to know the layout.
+    # ingest only runs on a genuinely fresh thread (LangGraph skips completed
+    # nodes on resume), so this is the right, and only, place to truncate the
+    # live log — a resumed run keeps its history instead of losing it.
+    livelog.reset(state["project_dir"], state["slice_id"])
     board = json.loads(pathlib.Path(state["board_path"]).read_text())
     scen = yaml.safe_load(pathlib.Path(state["scenarios_path"]).read_text())
     in_scope = [e for e in board["business_events"]
@@ -133,14 +142,15 @@ def gap_detect(state: S) -> dict:
         "business rules, unanswered questions, or untestable acceptance criteria."
         f"\n\n{json.dumps(digest, indent=1)}\n\n"
         'Return ONLY JSON: [{"id":...,"verdict":"ok"|"underspecified","missing":[...]}]',
-        usage=state["usage"], budget_usd=_budget(state),
+        usage=state["usage"], budget_usd=_budget(state), log_path=_log_path(state),
     )
     try:
         gaps = json.loads(out[out.index("["):out.rindex("]") + 1])
     except (ValueError, json.JSONDecodeError):
         gaps = [{"id": "?", "verdict": "parse_error", "raw": out[:300]}]
     n = len([g for g in gaps if g.get("verdict") == "underspecified"])
-    return {"gaps": gaps, "log": [f"gap_detect: {n} underspecified"]}
+    return {"gaps": gaps, "usage": state["usage"],
+            "log": [f"gap_detect: {n} underspecified"]}
 
 
 def gate_spec(state: S) -> dict:
@@ -202,9 +212,10 @@ def provision_db(state: S) -> dict:
     )
     infra.write_env(state["repo_path"], stack,
                     cfg.get("jwt_secret", "factory-local-dev-secret-not-for-production"))
-    infra.db_up(state["repo_path"], stack)
-    infra.install(state["repo_path"])
-    infra.reset_db(state["repo_path"], stack, cfg.get("db_reset_consent"))
+    lp = _log_path(state)
+    infra.db_up(state["repo_path"], stack, log_path=lp)
+    infra.install(state["repo_path"], log_path=lp)
+    infra.reset_db(state["repo_path"], stack, cfg.get("db_reset_consent"), log_path=lp)
     return {"stack": stack,
             "log": [f"db: database '{stack.db_name}' on shared postgres "
                     f"{stack.db_host}:{stack.db_port}, reset + template users "
@@ -213,9 +224,9 @@ def provision_db(state: S) -> dict:
 
 def baseline(state: S) -> dict:
     """Starter must build green BEFORE we generate — makes failures attributable."""
-    r = state["repo_path"]
+    r, lp = state["repo_path"], _log_path(state)
     for cmd in (["pnpm", "check-types"], ["pnpm", "build"]):
-        p = subprocess.run(cmd, cwd=r, capture_output=True, text=True, timeout=2400)
+        p = livelog.tee_subprocess(cmd, cwd=r, timeout=2400, check=False, log_path=lp)
         if p.returncode != 0:
             raise RuntimeError(f"starter not green ({' '.join(cmd)}):\n{p.stdout[-2000:]}")
     return {"log": ["baseline: starter type-checks and builds green"]}
@@ -256,9 +267,10 @@ def architect(state: S) -> dict:
         f"{yaml.safe_dump(sc.get('web_scenarios', []), sort_keys=False)[:1500]}\n\n"
         "Output exactly two fenced blocks, nothing else:\n"
         "```prisma\n<models>\n```\n```yaml\n<OpenAPI paths + schemas>\n```",
-        cwd=state["repo_path"], usage=state["usage"], budget_usd=_budget(state),
+        cwd=state["repo_path"], usage=state["usage"], budget_usd=_budget(state), log_path=_log_path(state),
     )
-    return {"contract": out, "log": ["architect: contract drafted"]}
+    return {"contract": out, "usage": state["usage"],
+            "log": ["architect: contract drafted"]}
 
 
 def contract_lint(state: S) -> dict:
@@ -322,8 +334,9 @@ def migrate(state: S) -> dict:
                 existing = existing.rstrip() + "\n\n" + block + "\n"
         schema.write_text(existing)
 
-    infra.migrate(state["repo_path"], state["stack"], state["cfg"].get("db_reset_consent"))
-    infra.seed_template_users(state["repo_path"], state["stack"])
+    lp = _log_path(state)
+    infra.migrate(state["repo_path"], state["stack"], state["cfg"].get("db_reset_consent"), log_path=lp)
+    infra.seed_template_users(state["repo_path"], state["stack"], log_path=lp)
     repo_mod.commit(state["repo_path"],
                     "feat(db): slice models + migration from approved contract")
     return {"log": ["migrate: models appended, migration applied, users re-seeded"]}
@@ -343,13 +356,19 @@ def write_tests(state: S) -> dict:
         "assert exactly what the scenario states. Write NO implementation code. "
         "Do NOT weaken assertions — these SHOULD fail now, because the feature "
         "does not exist yet. Never use it.skip.\n\n"
+        "You are running headless and UNATTENDED: nobody can answer questions, "
+        "so never stop to ask one — the run fails if the test files do not "
+        "exist on disk when you finish. Where a detail is not pinned down by "
+        "the frozen contract, make the most conventional choice consistent "
+        "with the starter's existing patterns, record that decision as a "
+        "comment next to the affected test, and keep going.\n\n"
         f"Frozen contract:\n{state['contract'][:4500]}\n\n"
         f"API scenarios:\n{yaml.safe_dump(sc['scenarios'], sort_keys=False)}\n\n"
         f"Web scenarios:\n{yaml.safe_dump(sc.get('web_scenarios', []), sort_keys=False)}\n\n"
         f"E2E scenarios:\n{yaml.safe_dump(sc.get('e2e_scenarios', []), sort_keys=False)}",
         cwd=state["repo_path"],
         write_scope=["apps/api/__tests__/**", "apps/web/__tests__/**"],
-        usage=state["usage"], budget_usd=_budget(state),
+        usage=state["usage"], budget_usd=_budget(state), log_path=_log_path(state),
     )
     tr = check_traceability(state["repo_path"], sc)
     if not tr.ok:
@@ -357,8 +376,12 @@ def write_tests(state: S) -> dict:
     rf = check_red_first(state["repo_path"], slug)
     if not rf.ok:
         raise RuntimeError("red-first failed:\n" + "\n".join(rf.errors))
-    repo_mod.commit(state["repo_path"], f"test({slug}): scenarios as executable tests")
-    return {"log": [f"write_tests: {tr.summary}; red-first ok"]}
+    # --no-verify: red-first tests reference not-yet-existing implementation
+    # modules, so the starter's pre-commit typecheck can never pass here.
+    repo_mod.commit(state["repo_path"], f"test({slug}): scenarios as executable tests",
+                    verify=False)
+    return {"usage": state["usage"],
+            "log": [f"write_tests: {tr.summary}; red-first ok"]}
 
 
 # =============================================================================
@@ -378,13 +401,14 @@ def _implement(state: S, phase: str, scope: list[str], instruction: str) -> dict
         "existing reference module's structure.\n\n"
         f"Frozen contract:\n{state['contract'][:4500]}{fix}",
         cwd=state["repo_path"], attempt=n, write_scope=scope, read_only=READ_ONLY,
-        usage=state["usage"], budget_usd=_budget(state),
+        usage=state["usage"], budget_usd=_budget(state), log_path=_log_path(state),
     )
     scope_check = check_write_scope(state["repo_path"], READ_ONLY)
     if not scope_check.ok:
         raise RuntimeError("ORACLE VIOLATION — tests modified:\n"
                            + "\n".join(scope_check.errors))
-    return {"attempts": {phase: n + 1}, "log": [f"{phase}: attempt {n + 1}"]}
+    return {"attempts": {phase: n + 1}, "usage": state["usage"],
+            "log": [f"{phase}: attempt {n + 1}"]}
 
 
 def implement_api(state: S) -> dict:
@@ -430,10 +454,15 @@ def launch_stack(state: S) -> dict:
 
 
 def verify_e2e(state: S) -> dict:
-    r = infra.run_e2e(state["repo_path"], state["stack"])
+    # Self-heal a stack whose processes died (or wedged) with the run that
+    # launched them — the checkpoint remembers launch_stack, the OS doesn't.
+    relaunched = infra.ensure_stack(state["repo_path"], state["stack"])
+    r = infra.run_e2e(state["repo_path"], state["stack"], log_path=_log_path(state))
+    log = ([f"verify_e2e: stack relaunched ({relaunched})"] if relaunched else []) \
+        + [f"verify_e2e: {'PASS' if r.ok else 'FAIL'} ({r.summary})"]
     return {"phase_out": {"e2e": r.output},
             "status": "green" if r.ok else "pending",
-            "log": [f"verify_e2e: {'PASS' if r.ok else 'FAIL'} ({r.summary})"]}
+            "log": log}
 
 
 def _diagnose(state: S, phase: str) -> dict:
@@ -444,9 +473,10 @@ def _diagnose(state: S, phase: str) -> dict:
         "error. Never suggest changing the tests.\n\n"
         f"Phase: {phase}\n\nFailure output:\n{state['phase_out'].get(phase,'')[-6000:]}\n\n"
         f"Contract:\n{state['contract'][:2500]}",
-        cwd=state["repo_path"], usage=state["usage"], budget_usd=_budget(state),
+        cwd=state["repo_path"], usage=state["usage"], budget_usd=_budget(state), log_path=_log_path(state),
     )
-    return {"diagnosis": {phase: out}, "log": [f"diagnose[{phase}]: produced"]}
+    return {"diagnosis": {phase: out}, "usage": state["usage"],
+            "log": [f"diagnose[{phase}]: produced"]}
 
 
 def diagnose_api(state: S) -> dict:
