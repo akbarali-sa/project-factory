@@ -244,6 +244,41 @@ class LiveLogCostTests(unittest.TestCase):
             self.assertEqual(livelog.live_log_cost(td, "nope"), 0.0)
 
 
+class RerunIdempotencyTests(unittest.TestCase):
+    """A reused repo (new thread generation / crashed-slice retry) re-runs
+    commit_specs and create_branch — both must tolerate already-done work."""
+
+    def _repo(self, td: str):
+        def git(*args: str) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                ["git", "-C", td, "-c", "user.name=t", "-c", "user.email=t@t",
+                 *args], capture_output=True, text=True, check=True)
+        git("init", "-b", "main")
+        pathlib.Path(td, "README.md").write_text("x\n")
+        git("add", "-A"); git("commit", "-m", "base")
+        return git
+
+    def test_commit_spec_artifacts_twice_is_fine(self) -> None:
+        with tempfile.TemporaryDirectory() as td, \
+             tempfile.TemporaryDirectory() as srcd:
+            self._repo(td)
+            board = pathlib.Path(srcd) / "x.board.json"
+            board.write_text("{}")
+            scen = pathlib.Path(srcd) / "x.scenarios.yaml"
+            scen.write_text("slice: {id: s}")
+            repo.commit_spec_artifacts(td, str(board), str(scen))
+            repo.commit_spec_artifacts(td, str(board), str(scen))  # no raise
+
+    def test_create_branch_switches_to_existing(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            git = self._repo(td)
+            repo.create_branch(td, "feat/x")
+            git("switch", "main")
+            repo.create_branch(td, "feat/x")   # exists — must SWITCH, not stay
+            self.assertEqual(
+                git("branch", "--show-current").stdout.strip(), "feat/x")
+
+
 class MergeToMainTests(unittest.TestCase):
     def test_merge_folds_branch_and_leaves_head_on_main(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -122,8 +122,14 @@ def commit_spec_artifacts(repo: str, board_path: str, scenarios_path: str,
         (specs / "constitution.md").write_text(constitution)
 
     _run(["git", "add", "-A"], cwd=repo)
-    _run(["git", "-c", "user.name=project-factory", "-c", "user.email=project-factory@local",
-          "commit", "-m", "docs(specs): board IR + approved scenarios"], cwd=repo)
+    # Tolerate "nothing to commit": a re-run on a reused repo (new thread
+    # generation, or run-project retrying a crashed slice) finds the specs
+    # already committed by the earlier attempt — same contract as commit().
+    p = _run(["git", "-c", "user.name=project-factory", "-c", "user.email=project-factory@local",
+              "commit", "-m", "docs(specs): board IR + approved scenarios"],
+             cwd=repo, check=False)
+    if p.returncode != 0 and "nothing to commit" not in (p.stdout + p.stderr):
+        raise RuntimeError(f"spec commit failed:\n{p.stdout}{p.stderr}")
 
 
 def commit(repo: str, message: str, verify: bool = True) -> None:
@@ -142,7 +148,13 @@ def commit(repo: str, message: str, verify: bool = True) -> None:
 
 
 def create_branch(repo: str, branch: str) -> None:
-    _run(["git", "switch", "-c", branch], cwd=repo, check=False)
+    """Create-or-switch. `switch -c` alone fails when the branch already
+    exists (a re-run) and check=False would leave HEAD wherever it was —
+    on main after a merge — silently landing slice commits on the wrong
+    branch."""
+    p = _run(["git", "switch", "-c", branch], cwd=repo, check=False)
+    if p.returncode != 0:
+        _run(["git", "switch", branch], cwd=repo)
 
 
 def merge_to_main(repo: str, branch: str) -> str:
