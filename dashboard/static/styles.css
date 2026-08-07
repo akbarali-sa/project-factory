@@ -251,9 +251,29 @@ button.link-btn {
 }
 
 .idle-note { color: var(--muted); font-size: 0.85rem; margin-top: 8px; }
-.cost-agents { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+/* Per-agent breakdown lives in a hover/focus popover so the Cost card stays
+   the same height as its stat-row siblings. */
+.cost-card { position: relative; }
+.cost-card:has(.cost-agents:not(:empty)) h2::after {
+  content: "· hover for breakdown"; text-transform: none; letter-spacing: 0;
+  font-weight: 400; margin-left: 6px; opacity: 0.7;
+}
+.cost-agents { display: none; position: absolute; left: 12px; right: 12px; top: calc(100% - 10px);
+               z-index: 30; flex-wrap: wrap; gap: 6px; padding: 10px;
+               background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+               box-shadow: var(--shadow); }
+.cost-agents:empty { display: none !important; }
+.cost-card:hover .cost-agents, .cost-card:focus-within .cost-agents { display: flex; }
 .cost-agents span { background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
                      padding: 3px 8px; font-size: 0.75rem; color: var(--muted); }
+
+/* Detail view: pipeline story left, operational panels right. */
+.detail-columns { display: grid; grid-template-columns: 1.25fr 1fr; gap: 16px; align-items: start; }
+.detail-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.gate-banner { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), var(--shadow); }
+@media (max-width: 1100px) {
+  .detail-columns { grid-template-columns: 1fr; }
+}
 
 .detail-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
 .detail-title { font-size: 1.1rem; font-weight: 700; }
