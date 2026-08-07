@@ -457,7 +457,9 @@ def verify_e2e(state: S) -> dict:
     # Self-heal a stack whose processes died (or wedged) with the run that
     # launched them — the checkpoint remembers launch_stack, the OS doesn't.
     relaunched = infra.ensure_stack(state["repo_path"], state["stack"])
-    r = infra.run_e2e(state["repo_path"], state["stack"], log_path=_log_path(state))
+    r = infra.run_e2e(state["repo_path"], state["stack"],
+                      consent=state["cfg"].get("db_reset_consent"),
+                      log_path=_log_path(state))
     log = ([f"verify_e2e: stack relaunched ({relaunched})"] if relaunched else []) \
         + [f"verify_e2e: {'PASS' if r.ok else 'FAIL'} ({r.summary})"]
     return {"phase_out": {"e2e": r.output},
