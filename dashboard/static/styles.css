@@ -272,7 +272,7 @@ button.link-btn {
 .detail-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .gate-banner { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), var(--shadow); }
 @media (max-width: 1100px) {
-  .detail-columns { grid-template-columns: 1fr; }
+  .detail-columns, .detail-columns[style] { grid-template-columns: 1fr !important; }
 }
 
 .detail-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }

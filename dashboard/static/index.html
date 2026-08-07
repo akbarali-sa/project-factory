@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Project Factory — Live Dashboard</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏭</text></svg>" />
-<link rel="stylesheet" href="/static/styles.css?v=5" />
+<link rel="stylesheet" href="/static/styles.css?v=6" />
 </head>
 <body>
   <div class="page">
@@ -144,25 +144,12 @@
         <div class="gate-panel" id="gate-panel"></div>
       </div>
 
-      <!-- Left: the pipeline story (phases first). Right: operational panels. -->
+      <!-- Left: the pipeline phases. Right: operational panels. -->
       <div class="detail-columns" style="margin-top:16px;">
         <div class="detail-col">
           <div class="card">
             <h2>Pipeline phases</h2>
             <ul class="phases" id="phases"></ul>
-          </div>
-          <div class="card">
-            <h2>Recent events (checkpoint)</h2>
-            <div class="log" id="log"></div>
-          </div>
-          <div class="card">
-            <h2>Full history (timestamped, searchable)</h2>
-            <div class="log-toolbar">
-              <input type="text" id="log-search" placeholder="Filter log…" />
-              <label><input type="checkbox" id="log-autoscroll" checked /> autoscroll</label>
-              <button class="copy-btn" id="log-copy">Copy</button>
-            </div>
-            <div class="log" id="activity-log"></div>
           </div>
         </div>
 
@@ -176,23 +163,6 @@
             <div class="meta" id="stack-meta"></div>
             <div class="stack-links" id="stack-links"></div>
             <div class="meta" id="stack-repo"></div>
-          </div>
-          <div class="card">
-            <h2 style="display:flex; align-items:center; gap:8px;">
-              Live CLI — what's emitting right now
-              <span class="badge" id="live-badge" style="margin-left:auto; font-size:0.68rem;">idle</span>
-            </h2>
-            <div class="meta" style="margin-bottom:8px;">
-              Raw tool calls, reasoning and subprocess output as they happen — not the checkpoint, which only
-              updates once a whole step finishes. Only populated while a <code>python -m project_factory run</code>
-              process is actually executing this slice.
-            </div>
-            <div class="log-toolbar">
-              <input type="text" id="live-search" placeholder="Filter live output…" />
-              <label><input type="checkbox" id="live-autoscroll" checked /> autoscroll</label>
-              <button class="copy-btn" id="live-clear">Clear</button>
-            </div>
-            <div class="log" id="live-log"></div>
           </div>
           <div class="card">
             <h2>Specs — the oracle</h2>
@@ -209,6 +179,42 @@
             <textarea id="spec-editor" class="spec-editor" spellcheck="false"
                       placeholder="Select a spec file above…"></textarea>
           </div>
+        </div>
+      </div>
+
+      <!-- Live CLI stretches the full width under the phases: raw output
+           lines are long, they deserve the whole viewport. -->
+      <div class="card" style="margin-top:16px;">
+        <h2 style="display:flex; align-items:center; gap:8px;">
+          Live CLI — what's emitting right now
+          <span class="badge" id="live-badge" style="margin-left:auto; font-size:0.68rem;">idle</span>
+        </h2>
+        <div class="meta" style="margin-bottom:8px;">
+          Raw tool calls, reasoning and subprocess output as they happen — not the checkpoint, which only
+          updates once a whole step finishes. Only populated while a <code>python -m project_factory run</code>
+          process is actually executing this slice.
+        </div>
+        <div class="log-toolbar">
+          <input type="text" id="live-search" placeholder="Filter live output…" />
+          <label><input type="checkbox" id="live-autoscroll" checked /> autoscroll</label>
+          <button class="copy-btn" id="live-clear">Clear</button>
+        </div>
+        <div class="log" id="live-log"></div>
+      </div>
+
+      <div class="detail-columns" style="margin-top:16px; grid-template-columns: 1fr 1fr;">
+        <div class="card">
+          <h2>Recent events (checkpoint)</h2>
+          <div class="log" id="log"></div>
+        </div>
+        <div class="card">
+          <h2>Full history (timestamped, searchable)</h2>
+          <div class="log-toolbar">
+            <input type="text" id="log-search" placeholder="Filter log…" />
+            <label><input type="checkbox" id="log-autoscroll" checked /> autoscroll</label>
+            <button class="copy-btn" id="log-copy">Copy</button>
+          </div>
+          <div class="log" id="activity-log"></div>
         </div>
       </div>
     </div>
