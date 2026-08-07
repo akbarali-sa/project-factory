@@ -43,6 +43,7 @@ from .harness import (
     run_tests,
 )
 from .models import BudgetExceeded, Usage, claude
+from .prompting import render_scenarios
 
 MAX_ATTEMPTS = 3
 
@@ -262,9 +263,9 @@ def architect(state: S) -> dict:
         f"Aggregates: {sc['aggregates']}\n\n"
         f"Domain events:\n{json.dumps(relevant, indent=1)[:6000]}\n\n"
         f"API scenarios the contract must satisfy:\n"
-        f"{yaml.safe_dump(sc['scenarios'], sort_keys=False)[:3500]}\n\n"
+        f"{render_scenarios(sc['scenarios'])}\n\n"
         f"Web scenarios (screens that will consume it):\n"
-        f"{yaml.safe_dump(sc.get('web_scenarios', []), sort_keys=False)[:1500]}\n\n"
+        f"{render_scenarios(sc.get('web_scenarios', []))}\n\n"
         "Output exactly two fenced blocks, nothing else:\n"
         "```prisma\n<models>\n```\n```yaml\n<OpenAPI paths + schemas>\n```",
         cwd=state["repo_path"], usage=state["usage"], budget_usd=_budget(state), log_path=_log_path(state),
@@ -363,9 +364,9 @@ def write_tests(state: S) -> dict:
         "with the starter's existing patterns, record that decision as a "
         "comment next to the affected test, and keep going.\n\n"
         f"Frozen contract:\n{state['contract'][:4500]}\n\n"
-        f"API scenarios:\n{yaml.safe_dump(sc['scenarios'], sort_keys=False)}\n\n"
-        f"Web scenarios:\n{yaml.safe_dump(sc.get('web_scenarios', []), sort_keys=False)}\n\n"
-        f"E2E scenarios:\n{yaml.safe_dump(sc.get('e2e_scenarios', []), sort_keys=False)}",
+        f"API scenarios:\n{render_scenarios(sc['scenarios'])}\n\n"
+        f"Web scenarios:\n{render_scenarios(sc.get('web_scenarios', []))}\n\n"
+        f"E2E scenarios:\n{render_scenarios(sc.get('e2e_scenarios', []))}",
         cwd=state["repo_path"],
         write_scope=["apps/api/__tests__/**", "apps/web/__tests__/**"],
         usage=state["usage"], budget_usd=_budget(state), log_path=_log_path(state),
