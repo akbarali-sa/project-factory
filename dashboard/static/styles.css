@@ -241,6 +241,7 @@ button.link-btn {
        max-height: 320px; overflow-y: auto; background: var(--code-bg); border-radius: 10px; padding: 10px 12px; }
 .log-line { display: flex; gap: 10px; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
 .log-line .ts { color: var(--accent); flex: none; opacity: 0.75; }
+.log-line .dur { color: var(--muted); flex: none; margin-left: auto; opacity: 0.8; font-size: 0.85em; padding-left: 10px; }
 .log-line.fail { color: var(--red); }
 .log-line.match { background: var(--accent-soft); border-radius: 4px; }
 .log-line.day-banner {

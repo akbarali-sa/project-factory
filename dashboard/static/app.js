@@ -650,8 +650,15 @@ async function fetchTimeline() {
 function renderTimeline(t) {
   document.getElementById('started-stat').textContent = t.started_at ? localTime(t.started_at) : '—';
   document.getElementById('started-meta').textContent = t.started_at ? timeAgo(t.started_at) : 'not started yet';
-  document.getElementById('elapsed-stat').textContent = fmtDuration(t.elapsed_s);
-  document.getElementById('elapsed-meta').textContent = t.last_update_at ? `last update ${timeAgo(t.last_update_at)}` : '';
+  // Active time (work actually happening, from live-log activity spans) is
+  // the headline; wall-clock (which includes gate waits / sleeps / crashes)
+  // is demoted to the meta line so it can't masquerade as effort.
+  document.getElementById('elapsed-stat').textContent = fmtDuration(t.active_s != null ? t.active_s : t.elapsed_s);
+  const metaBits = [];
+  if (t.active_s != null && t.elapsed_s != null && t.elapsed_s > t.active_s + 60)
+    metaBits.push(`wall ${fmtDuration(t.elapsed_s)}`);
+  if (t.last_update_at) metaBits.push(`last update ${timeAgo(t.last_update_at)}`);
+  document.getElementById('elapsed-meta').textContent = metaBits.join(' · ');
 
   state.timelineEvents = t.events || [];
   renderLog();
@@ -663,7 +670,7 @@ function renderLog() {
   const el = document.getElementById('activity-log');
   el.innerHTML = filtered.map(e => `
     <div class="log-line ${/FAIL/.test(e.line) ? 'fail' : ''} ${filter ? 'match' : ''}">
-      <span class="ts">${localTime(e.ts)}</span><span>${escapeHtml(e.line)}</span>
+      <span class="ts">${localTime(e.ts)}</span><span>${escapeHtml(e.line)}</span>${e.dur_s != null && e.dur_s > 0 ? `<span class="dur">${fmtDuration(e.dur_s)}</span>` : ''}
     </div>`).join('') || '<div class="log-line">(no activity yet)</div>';
   if (state.logAutoscroll) el.scrollTop = el.scrollHeight;
 }

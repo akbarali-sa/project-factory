@@ -297,6 +297,65 @@ def _status_payload(slug: str, slice_id: str) -> dict:
     }
 
 
+# A quiet stretch longer than this in the live log means the run wasn't
+# actually doing anything (gate wait, crashed node, laptop asleep). Shorter
+# quiet stretches are normal inside a node (model thinking between streamed
+# tool calls, a silent pnpm step) and count as active.
+_ACTIVITY_MERGE_GAP_S = 300
+
+_DAY_BANNER_RE = re.compile(r"^───── (\d{4}-\d{2}-\d{2}) ─────")
+_TS_LINE_RE = re.compile(r"^\[(\d{2}):(\d{2}):(\d{2})\]")
+
+
+def _activity_spans(log_path: pathlib.Path) -> list[tuple[datetime, datetime]]:
+    """
+    Continuous work intervals (UTC) reconstructed from the live log's
+    per-line HH:MM:SS stamps + livelog's day banners. This is the ground
+    truth for "actually spent" time: checkpoint timestamps alone can't
+    distinguish a node that ran 6h from a node that ran 6min next to a
+    laptop that slept 5h54m — the log only gains lines while work happens.
+    """
+    if not log_path.exists():
+        return []
+    spans: list[tuple[datetime, datetime]] = []
+    day: str | None = None
+    prev: datetime | None = None
+    local_tz = datetime.now().astimezone().tzinfo
+    for raw in log_path.read_text(errors="replace").splitlines():
+        m = _DAY_BANNER_RE.match(raw)
+        if m:
+            day = m.group(1)
+            continue
+        m = _TS_LINE_RE.match(raw)
+        if not m or day is None:
+            continue
+        h, mnt, s = (int(g) for g in m.groups())
+        try:
+            t = datetime.fromisoformat(day).replace(
+                hour=h, minute=mnt, second=s, tzinfo=local_tz
+            ).astimezone(timezone.utc)
+        except ValueError:
+            continue
+        if prev is not None and t < prev:
+            # clock went backwards without a banner (rare) — skip, the next
+            # banner or monotonic line resynchronises us
+            continue
+        if prev is not None and (t - prev).total_seconds() <= _ACTIVITY_MERGE_GAP_S:
+            spans[-1] = (spans[-1][0], t)
+        else:
+            spans.append((t, t))
+        prev = t
+    return spans
+
+
+def _active_overlap_s(spans: list[tuple[datetime, datetime]],
+                      start: datetime, end: datetime) -> float:
+    return sum(
+        max(0.0, (min(b, end) - max(a, start)).total_seconds())
+        for a, b in spans if a < end and b > start
+    )
+
+
 def _timeline_payload(slug: str, slice_id: str) -> dict:
     try:
         project = cfgmod.discover(slug)
@@ -310,12 +369,31 @@ def _timeline_payload(slug: str, slice_id: str) -> dict:
         hist = list(gapp.get_state_history(thread))
     hist.reverse()  # oldest -> newest
 
+    spans = _activity_spans(
+        project.dir / ".factory" / "live" / f"{slice_id}.log")
+
+    # Per-step timing: each snapshot's new log lines belong to the node that
+    # just completed; its cost in time is the ACTIVE overlap of
+    # [previous checkpoint, this checkpoint] — so a step that crashed at
+    # 20:32 and was resumed at 10:27 next morning reports minutes of work,
+    # not 14h of idle. The in-flight node shows up once it checkpoints.
     events: list[dict] = []
     prev_len = 0
+    prev_dt: datetime | None = None
     for snap in hist:
         log = (snap.values or {}).get("log") or []
-        for line in log[prev_len:]:
-            events.append({"ts": snap.created_at, "line": _clean(line)})
+        new_lines = log[prev_len:]
+        dur_s = None
+        try:
+            snap_dt = datetime.fromisoformat(snap.created_at)
+            if prev_dt is not None:
+                dur_s = round(_active_overlap_s(spans, prev_dt, snap_dt))
+            prev_dt = snap_dt
+        except (TypeError, ValueError):
+            prev_dt = None
+        for i, line in enumerate(new_lines):
+            events.append({"ts": snap.created_at, "line": _clean(line),
+                           "dur_s": dur_s if i == 0 else None})
         prev_len = len(log)
 
     started_at = hist[0].created_at if hist else None
@@ -333,6 +411,7 @@ def _timeline_payload(slug: str, slice_id: str) -> dict:
         "started_at": started_at,
         "last_update_at": last_at,
         "elapsed_s": elapsed_s,
+        "active_s": round(sum((b - a).total_seconds() for a, b in spans)),
         "events": events,
     }
 
