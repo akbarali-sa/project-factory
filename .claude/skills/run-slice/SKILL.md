@@ -34,6 +34,13 @@ re-deriving anything here from scratch.
      stale tab.
    The dashboard is the primary "is it still running?" view during the long
    silent phases below — keep it open for the whole run.
+   **Restart the dashboard server after pulling factory changes** — uvicorn
+   runs without --reload, so a long-lived dashboard keeps old code in memory.
+   Symptom of a stale server (not just a stale tab): the dashboard shows a
+   step/cost pinned in the past while the live log clearly progresses — a
+   pre-thread-generations dashboard silently watches the dead g1 thread while
+   the real run happens on g2. Runs survive the restart
+   (runner uses start_new_session=True).
 1. `source .venv/bin/activate`, then `python -m project_factory doctor` —
    catches missing tools/wrong versions before you spend anything.
 2. `python -m project_factory new <slug> --board <path> --slice-name <name>`
