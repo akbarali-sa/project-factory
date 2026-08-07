@@ -517,12 +517,23 @@ def _drive_slice(project, chosen, overlay: dict) -> int:
             return HUMAN_ACTION_NEEDED
         return _report(res, project, chosen)
     except BudgetExceeded as e:
+        print(f"\nABORTED (budget): {e}", file=sys.stderr)
+        return 3
+    except RuntimeError as e:
+        # A node crash (agent connection drop, lint failure, subprocess error)
+        # must not escape as a bare traceback: report it, keep the exit code
+        # meaningful, and let the finally below record what was spent — the
+        # checkpoint loses the crashed node's usage, the live log doesn't.
+        print(f"\n{chosen.id} crashed mid-node:\n{e}\n\nre-run run-project to "
+              f"resume from the checkpoint (only the crashed node re-runs)",
+              file=sys.stderr)
+        return 1
+    finally:
+        # Ground-truth spend on EVERY exit path — green, gate, crash, abort —
+        # so run-project's next budget check never reasons from a stale ledger.
         truth = livelog.live_log_cost(str(project.dir), chosen.id)
         if truth:
             project.record_slice_cost(chosen.id, truth)
-        print(f"\nABORTED (budget): {e}", file=sys.stderr)
-        return 3
-    finally:
         cm.__exit__(None, None, None)
 
 
