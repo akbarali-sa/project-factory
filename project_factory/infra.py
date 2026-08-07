@@ -438,6 +438,7 @@ class E2EResult:
 
 
 def run_e2e(repo: str, stack: Stack, grep: str | None = None,
+           consent: str | None = None,
            log_path: pathlib.Path | None = None) -> E2EResult:
     """
     Playwright via the starter's own script. Pin the Playwright version in
@@ -451,7 +452,11 @@ def run_e2e(repo: str, stack: Stack, grep: str | None = None,
     # should be reused. Passing the wrong names means it never recognizes the
     # servers launch_stack() already started, so it tries to boot its own
     # redundant copies — which then time out against config.webServer.
-    env = {"TZ": "UTC", "NEXT_PUBLIC_WEB_URL": stack.web_url, "NEXT_PUBLIC_API_URL": stack.api_url}
+    # Consent rides along because generated e2e setups may shell out to
+    # `pnpm db:reset` themselves (the oracle's isolation strategy) — same
+    # project, same dev DB, same human consent as provision_db/migrate.
+    env = {"TZ": "UTC", "NEXT_PUBLIC_WEB_URL": stack.web_url, "NEXT_PUBLIC_API_URL": stack.api_url,
+           **_consent_env(consent)}
     if log_path is not None:
         p = livelog.tee_subprocess(cmd, cwd=repo, env=env, timeout=2400,
                                    check=False, log_path=log_path)

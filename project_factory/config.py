@@ -415,6 +415,32 @@ def scaffold(slug: str, board: str | None, workspace: str | None = None,
     return discover(slug, workspace)
 
 
+def record_db_reset_consent(project: Project) -> bool:
+    """
+    Write the canned db-reset consent text into the project's run.json, from
+    which infra._consent_env feeds PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION.
+
+    Call ONLY on an explicit human action — the CLI prompt/flag on `new`, or
+    the dashboard's checkbox. Never invent, default, or backfill this value:
+    the whole point is that a human reviewed it for THIS project's dev
+    database. Returns False when consent was already recorded (never
+    overwrites the human's original wording).
+    """
+    run_file = project.dir / "run.json"
+    run_cfg = json.loads(run_file.read_text()) if run_file.exists() else {}
+    if run_cfg.get("db_reset_consent"):
+        return False
+    db_name = project.slug.replace("-", "_")
+    run_cfg["db_reset_consent"] = (
+        f"I consent to prisma migrate reset --force destroying and "
+        f"recreating all data in the local development database "
+        f"{db_name} on {project.cfg.get('db_host', 'localhost')}:"
+        f"{project.cfg.get('db_port', 5432)}, on every run of this project."
+    )
+    run_file.write_text(json.dumps(run_cfg, indent=2) + "\n")
+    return True
+
+
 # -----------------------------------------------------------------------------
 # Resolve-and-print: never spend tokens on a misresolved run
 # -----------------------------------------------------------------------------

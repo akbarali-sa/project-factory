@@ -513,18 +513,7 @@ def create_project(body: dict = Body(...)):
     # matches the label they agreed to). Never invented or defaulted here.
     consent_written = False
     if (body or {}).get("db_reset_consent") is True:
-        run_file = project.dir / "run.json"
-        run_cfg = json.loads(run_file.read_text()) if run_file.exists() else {}
-        if not run_cfg.get("db_reset_consent"):
-            db_name = slug.replace("-", "_")
-            run_cfg["db_reset_consent"] = (
-                f"I consent to prisma migrate reset --force destroying and "
-                f"recreating all data in the local development database "
-                f"{db_name} on {project.cfg.get('db_host', 'localhost')}:"
-                f"{project.cfg.get('db_port', 5432)}, on every run of this project."
-            )
-            run_file.write_text(json.dumps(run_cfg, indent=2) + "\n")
-            consent_written = True
+        consent_written = cfgmod.record_db_reset_consent(project)
 
     return {
         "slug": slug,
