@@ -65,6 +65,15 @@ AGENT_TIER: dict[str, str] = {
 
     # Reads failure output and reasons about cause. Hard, but rare.
     "diagnostician": "opus",
+
+    # Project-level planning: partitions the whole board into wave-ordered
+    # slices. Runs once per project; the plan is a human-reviewed artifact.
+    "planner": "opus",
+
+    # Drafts a slice's scenarios.yaml (the oracle) from the board + plan.
+    # The draft replaces hand-authoring, not human judgment: it is reviewed
+    # at the project plan gate / Gate A per the project's gate policy.
+    "oracle_author": "opus",
 }
 
 # Escalate the Implementer after repeated failure: cheap first, expensive only

@@ -92,11 +92,25 @@ def _report(res: dict, project, chosen) -> int:
     if usage and usage.by_agent:
         print("cost by agent: "
               + json.dumps({k: round(v, 3) for k, v in usage.by_agent.items()}))
+
+    # Ground-truth cost per slice, recorded win or lose: the live log keeps
+    # agent lines whose state update a crash later discarded, so it is the
+    # number project budgets must trust (see livelog.live_log_cost).
+    truth = livelog.live_log_cost(str(project.dir), chosen.id)
+    if usage:
+        truth = max(truth, round(usage.cost_usd, 2))
+    if truth:
+        project.record_slice_cost(chosen.id, truth)
+
     if status == "green":
         project.mark_completed(chosen.id)
         print(f"recorded in {project.state_file}")
         nxt = project.next_slice()
         print(f"next slice: {nxt.id}" if nxt else "all slices complete")
+        from . import planner as planmod
+        if planmod.plan_is_approved(planmod.load_plan(project)):
+            print(f"continue the project: python -m project_factory "
+                  f"run-project {project.slug}")
         return 0
     return 1
 
@@ -123,10 +137,12 @@ def _cmd_list(args) -> int:
 
 
 def _cmd_new(args) -> int:
-    p = cfgmod.scaffold(args.slug, args.board, args.workspace, args.slice_name)
+    p = cfgmod.scaffold(args.slug, args.board, args.workspace, args.slice_name,
+                        project_mode=bool(getattr(args, "project", False)))
     print(f"created {p.dir}")
-    print(f"  specs/     {p.board_path.name} + "
-          f"{', '.join(s.path.name for s in p.slices)}")
+    print(f"  specs/     {p.board_path.name}"
+          + (f" + {', '.join(s.path.name for s in p.slices)}" if p.slices
+             else " (slices come from the plan — run-project drafts them)"))
     print("  run.json   overrides only")
 
     # Db-reset consent is collected HERE, at scaffold time, so provision_db
@@ -146,9 +162,13 @@ def _cmd_new(args) -> int:
     else:
         print("  note: no db_reset_consent — the first run will stop at "
               "provision_db until you add it to run.json")
-    print("\nNext: author the scenarios — this is the ORACLE, the highest-value "
-          "work in the pipeline. Then:")
-    print(f"  python -m project_factory run {args.slug} --dry-run")
+    if getattr(args, "project", False):
+        print("\nNext: plan the whole project from the board:")
+        print(f"  python -m project_factory run-project {args.slug}")
+    else:
+        print("\nNext: author the scenarios — this is the ORACLE, the "
+              "highest-value work in the pipeline. Then:")
+        print(f"  python -m project_factory run {args.slug} --dry-run")
     return 0
 
 
@@ -255,7 +275,20 @@ def _cmd_approve(args) -> int:
             _show_gate(payloads2)
             print(f"\nresume:  python -m project_factory approve {args.slug}")
             return 0
-        return _report(res, project, chosen)
+        rc = _report(res, project, chosen)
+        if rc == 0:
+            # In project mode (approved plan), a Gate C approval should carry
+            # the project forward without a separate human step: chain into
+            # run-project, which drafts the next oracle and drives the next
+            # slice until ITS human gate. Single-slice projects (no plan)
+            # keep today's behaviour.
+            from . import planner as planmod
+            if planmod.plan_is_approved(planmod.load_plan(project)):
+                print("\nproject mode: continuing with the next planned slice…\n")
+                return _cmd_run_project(argparse.Namespace(
+                    slug=args.slug, workspace=args.workspace,
+                    dry_run=False, gates=None, max_slices=None))
+        return rc
     except BudgetExceeded as e:
         print(f"\nABORTED (budget): {e}", file=sys.stderr)
         return 3
@@ -386,6 +419,260 @@ def _cmd_run(args) -> int:
         cm.__exit__(None, None, None)
 
 
+HUMAN_ACTION_NEEDED = 10  # run-project stopped at a human gate — not an error
+
+
+def _parse_gates(spec: str | None) -> dict | None:
+    if not spec:
+        return None
+    gates = {}
+    for part in spec.split(","):
+        k, _, v = part.strip().partition("=")
+        if k not in ("spec", "contract", "pr") or v not in ("auto", "human"):
+            raise SystemExit(f"bad --gates entry '{part}' "
+                             "(want spec|contract|pr=auto|human)")
+        gates[k] = v
+    return gates
+
+
+def _project_gate_policy(project, cli_gates: dict | None) -> dict:
+    """--gates > run.json's explicit \"gates\" > PROJECT_GATE_POLICY."""
+    if cli_gates:
+        return {**cfgmod.PROJECT_GATE_POLICY, **cli_gates}
+    run_file = project.dir / "run.json"
+    if run_file.exists():
+        raw = json.loads(run_file.read_text())
+        if isinstance(raw.get("gates"), dict):
+            return {**cfgmod.PROJECT_GATE_POLICY, **raw["gates"]}
+    return dict(cfgmod.PROJECT_GATE_POLICY)
+
+
+def _drive_slice(project, chosen, overlay: dict) -> int:
+    """
+    Run (or resume) one slice thread with project-mode cfg overlaid
+    (remaining budget, gate policy, merge_on_approval, fresh_clone=False).
+    Returns 0 green, 1 parked/failed, 3 budget, HUMAN_ACTION_NEEDED at a gate.
+    """
+    from .models import BudgetExceeded
+
+    cfg = {**project.cfg, **overlay}
+    cm, app = _open_app(project)
+    try:
+        thread = {"configurable": {"thread_id": project.thread_id(chosen.id)}}
+        nxt, payloads = _pending(app, thread)
+
+        finished_thread = False
+        if not nxt:
+            try:
+                finished_thread = bool(app.get_state(thread).values)
+            except Exception:  # noqa: BLE001 — no checkpoint yet
+                finished_thread = False
+        if finished_thread:
+            gen = project.bump_thread_generation(chosen.id)
+            print(f"slice {chosen.id}: previous thread finished — "
+                  f"new generation g{gen}")
+            thread = {"configurable": {"thread_id": project.thread_id(chosen.id)}}
+            nxt, payloads = [], []
+
+        if nxt and payloads:
+            print(f"\n{chosen.id} is waiting at a gate:")
+            _show_gate(payloads)
+            print(f"\n  python -m project_factory approve {project.slug} "
+                  f"--slice {chosen.id} --by <you>")
+            return HUMAN_ACTION_NEEDED
+
+        payload = None if nxt else {
+            "cfg": cfg,
+            "board_path": str(project.board_path),
+            "scenarios_path": str(chosen.path),
+            "repo_path": str(project.repo_path),
+            "project_dir": str(project.dir),
+            "slice_id": chosen.id,
+        }
+        if nxt:
+            print(f"resuming {chosen.id} from checkpoint "
+                  f"(was before {', '.join(nxt)})")
+            app.update_state(thread, {"cfg": cfg})
+
+        livelog.acquire_run_lock(str(project.dir), chosen.id, cmd=sys.argv)
+        try:
+            res = app.invoke(payload, thread)
+        finally:
+            livelog.release_run_lock(str(project.dir), chosen.id)
+
+        nxt2, payloads2 = _pending(app, thread)
+        if nxt2:
+            if res.get("log"):
+                print("\n".join(res["log"]))
+            if payloads2:
+                print(f"\n{chosen.id} paused at a gate:")
+                _show_gate(payloads2)
+                print(f"\napprove it (CLI below, or the dashboard), then re-run "
+                      f"run-project to continue:\n"
+                      f"  python -m project_factory approve {project.slug} "
+                      f"--slice {chosen.id} --by <you>")
+                return HUMAN_ACTION_NEEDED
+            print(f"\n{chosen.id} paused before {', '.join(nxt2)} — re-run "
+                  f"run-project to continue")
+            return HUMAN_ACTION_NEEDED
+        return _report(res, project, chosen)
+    except BudgetExceeded as e:
+        truth = livelog.live_log_cost(str(project.dir), chosen.id)
+        if truth:
+            project.record_slice_cost(chosen.id, truth)
+        print(f"\nABORTED (budget): {e}", file=sys.stderr)
+        return 3
+    finally:
+        cm.__exit__(None, None, None)
+
+
+def _cmd_run_project(args) -> int:
+    """
+    Drive a whole project from its board: plan slices (once, human-approved),
+    then for each planned slice draft the oracle and run the slice pipeline,
+    merging each Gate-C-approved slice into main. Re-entrant: it advances as
+    far as it can and exits at the first decision a human owns.
+    """
+    from . import planner as planmod
+
+    try:
+        project = cfgmod.discover(args.slug, args.workspace)
+    except cfgmod.ConfigError as e:
+        print(f"config error:\n{e}", file=sys.stderr)
+        return 2
+
+    gates = _project_gate_policy(project, _parse_gates(args.gates))
+    project_budget = float(project.cfg.get("project_budget_usd", 100.0))
+    spent = project.spent_usd()
+
+    print(f"project      {project.slug}  ({project.dir})")
+    print(f"board        {project.board_path.name}")
+    print(f"budget       ${project_budget:.2f} project-wide, "
+          f"${spent:.2f} recorded so far")
+    print(f"gate policy  {json.dumps(gates)}  (Gate C human by default)")
+
+    # ---- phase 1: the plan (project-level gate) ----------------------------
+    plan = planmod.load_plan(project)
+    if not (plan and plan.get("slices")):
+        if args.dry_run:
+            print("\n--dry-run: would plan slices from the board (planner, opus)")
+            return 0
+        print("\nplanning slices from the board (planner, opus)…")
+        try:
+            plan = planmod.plan_slices(
+                project, budget_usd=project_budget - spent,
+                log_path=livelog.path_for(str(project.dir), "project"))
+        except planmod.PlanError as e:
+            print(f"\nplan failed: {e}", file=sys.stderr)
+            return 1
+        _print_plan(plan)
+        print(f"\nTHE PLAN IS THE PROJECT-LEVEL GATE. Review "
+              f"{planmod.plan_path(project)},\nedit it freely, then:\n"
+              f"  python -m project_factory approve-plan {args.slug} --by <you>")
+        return HUMAN_ACTION_NEEDED
+
+    if not planmod.plan_is_approved(plan):
+        _print_plan(plan)
+        print(f"\nplan awaits approval:\n"
+              f"  python -m project_factory approve-plan {args.slug} --by <you>")
+        return HUMAN_ACTION_NEEDED
+
+    if args.dry_run:
+        _print_plan(plan)
+        print("\n--dry-run: nothing executed")
+        return 0
+
+    print()
+    print(infra.preflight())
+
+    # ---- phase 2: slices, in wave order -------------------------------------
+    done = set(project.state.get("completed_slices", []))
+    ordered = sorted(plan["slices"], key=lambda s: (s["wave"], s["id"]))
+    for planned in ordered:
+        if planned["id"] in done:
+            continue
+        if args.max_slices is not None and len(done) >= args.max_slices:
+            print(f"\n--max-slices {args.max_slices} reached")
+            return 0
+
+        spent = project.spent_usd()
+        remaining = round(project_budget - spent, 2)
+        if remaining < 2.0:
+            print(f"\nproject budget exhausted: ${spent:.2f} of "
+                  f"${project_budget:.2f} recorded (raise project_budget_usd "
+                  f"in run.json to continue)", file=sys.stderr)
+            return 3
+
+        spath = planmod.scenarios_path_for(project, planned["id"])
+        if not spath.exists():
+            print(f"\ndrafting oracle for {planned['id']} "
+                  f"(oracle_author, opus, ${remaining:.2f} remaining)…")
+            try:
+                planmod.author_oracle(
+                    project, planned, budget_usd=remaining,
+                    log_path=livelog.path_for(str(project.dir), "project"))
+            except planmod.PlanError as e:
+                print(f"\noracle draft failed: {e}", file=sys.stderr)
+                return 1
+            print(f"oracle drafted: {spath.name}")
+
+        # Re-discover so the drafted file becomes a Slice object.
+        project = cfgmod.discover(args.slug, args.workspace)
+        matches = [s for s in project.slices if s.id == planned["id"]]
+        if not matches:
+            print(f"drafted oracle's slice.id doesn't match the plan "
+                  f"({planned['id']}) — fix {spath}", file=sys.stderr)
+            return 1
+
+        print(f"\n=== slice {planned['id']} (wave {planned['wave']}, "
+              f"${remaining:.2f} of budget remaining) ===")
+        overlay = {"budget_usd": remaining, "gates": gates,
+                   "merge_on_approval": True, "fresh_clone": False}
+        rc = _drive_slice(project, matches[0], overlay)
+        if rc == HUMAN_ACTION_NEEDED:
+            return 0        # not an error — a human owns the next move
+        if rc != 0:
+            return rc
+        project = cfgmod.discover(args.slug, args.workspace)
+        done = set(project.state.get("completed_slices", []))
+
+    print(f"\nALL PLANNED SLICES COMPLETE — ${project.spent_usd():.2f} of "
+          f"${project_budget:.2f} spent. Repo: {project.repo_path}")
+    return 0
+
+
+def _print_plan(plan: dict) -> None:
+    print(f"\nplan ({len(plan.get('slices', []))} slices"
+          + (f", approved by {plan['approved_by']}" if plan.get("approved_by")
+             else ", NOT yet approved") + "):")
+    for s in sorted(plan.get("slices", []), key=lambda x: (x["wave"], x["id"])):
+        print(f"  w{s['wave']} {s['id']:40} {len(s.get('event_ids', []))} events"
+              f"  — {s.get('name', '')}")
+    for o in plan.get("out_of_scope", []):
+        print(f"  --  {o.get('id', '?'):40} out of scope: {o.get('reason', '')[:80]}")
+
+
+def _cmd_approve_plan(args) -> int:
+    from . import planner as planmod
+    try:
+        project = cfgmod.discover(args.slug, args.workspace)
+    except cfgmod.ConfigError as e:
+        print(f"config error:\n{e}", file=sys.stderr)
+        return 2
+    if not args.by:
+        print("--by <name> is required: plan approval is the project-level "
+              "human gate and must be attributable", file=sys.stderr)
+        return 2
+    try:
+        plan = planmod.approve_plan(project, args.by)
+    except planmod.PlanError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    _print_plan(plan)
+    print(f"\napproved. Continue: python -m project_factory run-project {args.slug}")
+    return 0
+
+
 # -----------------------------------------------------------------------------
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="project_factory")
@@ -399,11 +686,37 @@ def main(argv: list[str] | None = None) -> int:
     n.add_argument("slug")
     n.add_argument("--board", help="path to the presales *.board.json")
     n.add_argument("--slice-name", default="slice-001")
+    n.add_argument("--project", action="store_true",
+                   help="board-only project for run-project: no placeholder "
+                        "scenarios file — the planner derives slices and the "
+                        "oracle_author drafts each scenarios.yaml")
     n.add_argument("--db-reset-consent", action="store_true",
                    help="record consent for the destructive dev-DB reset "
                         "(prisma migrate reset) in run.json now, instead of "
                         "being prompted interactively / stopping mid-run")
     n.set_defaults(fn=_cmd_new)
+
+    rp = sub.add_parser("run-project",
+                        help="drive ALL slices from the board: plan → draft "
+                             "oracles → run each slice → merge on Gate C")
+    rp.add_argument("slug")
+    rp.add_argument("--dry-run", action="store_true",
+                    help="print the plan and stop; never spends")
+    rp.add_argument("--gates",
+                    help="override gate policy, e.g. spec=human,contract=auto "
+                         "(default: spec=auto,contract=auto,pr=human)")
+    rp.add_argument("--max-slices", type=int,
+                    help="stop after N completed slices (checkpointing a "
+                         "long project into sessions)")
+    rp.set_defaults(fn=_cmd_run_project)
+
+    apl = sub.add_parser("approve-plan",
+                         help="record human approval of specs/project-plan.json "
+                              "(the project-level gate)")
+    apl.add_argument("slug")
+    apl.add_argument("--by", default="",
+                     help="who approved — required, recorded in the plan")
+    apl.set_defaults(fn=_cmd_approve_plan)
 
     r = sub.add_parser("run", help="run (or resume) one slice")
     r.add_argument("slug")

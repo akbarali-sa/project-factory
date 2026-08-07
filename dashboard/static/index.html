@@ -57,6 +57,16 @@
         <label class="form-label">…or paste the board JSON directly</label>
         <textarea id="np-board-json" placeholder='{"name": "...", "business_events": [...]}' style="min-height:80px;"></textarea>
 
+        <label class="slice-candidate" style="margin-top:10px;">
+          <input type="checkbox" id="np-project-mode" />
+          <span><b>Full project (run-project)</b>
+            <span class="meta">No hand-authored slices: an Opus planner partitions the board into a
+            wave-ordered plan (which you approve — the project-level gate), then each slice's
+            scenarios are drafted, built, verified, and merged in turn. Gate policy defaults to
+            auto A+B, human Gate C.</span>
+          </span>
+        </label>
+
         <div id="np-slices" class="hidden">
           <label class="form-label">Slices found in the board — pick which to scaffold</label>
           <div class="meta" style="margin-bottom:6px;">

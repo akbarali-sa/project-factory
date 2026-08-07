@@ -1,0 +1,179 @@
+# =============================================================================
+# EXEMPLAR ORACLE — the quality bar for agent-drafted scenarios.
+#
+# This is the (lightly trimmed) human-authored oracle from the first successful
+# factory run (barcode-sorting, slice_container_packing_list). The oracle_author
+# agent receives it as a STYLE AND RIGOR reference: structure, precision of
+# given/when/then, explicit rejection paths, test-data strategy, provisional
+# discipline, out-of-scope honesty. It must never copy its domain content.
+# =============================================================================
+
+slice:
+  id: slice_container_packing_list
+  name: Container registration & packing list ingestion
+  wave: 1
+  bounded_context: Packing List Ingestion
+  approved_by: null
+  approved_at: null
+
+aggregates:
+  - Container
+  - PackingList
+  - PackingListItem
+
+starter_constraints:
+  ids: >
+    Primary keys are `String @id @default(cuid())`. The API serialises them as
+    `_id` on the wire (src/common/serializers/api.serializer.ts) — assert on
+    `_id`, not `id`, in API and E2E tests.
+  auth: >
+    Email-only login, no passwords. JWT in an httpOnly cookie on web, guarded in
+    apps/web/src/proxy.ts. Seeded users: john.doe@example.com,
+    jane.doe@example.com, mark.s@example.com.
+  seeded_users: [john.doe@example.com, jane.doe@example.com, mark.s@example.com]
+  conventions: >
+    Explicit join tables over implicit m2m; Cascade on structural parents,
+    Restrict on user references, SetNull on optional assignments; no unique
+    constraint on ordering columns; wrap prisma.x.update() in nullIfMissing() so
+    a missing row 404s instead of 500s; multi-statement writes inside
+    $transaction using tx.* — see apps/api/prisma/schema.prisma and MIGRATION.md.
+  schema_rule: >
+    APPEND to apps/api/prisma/schema.prisma. Never overwrite it — it holds the
+    generator, datasource and the `User` model auth depends on.
+
+scenarios:
+
+  - id: SC-001
+    title: Admin uploads a valid packing list and the container is registered
+    traces_to: [be_packing_list_uploaded, be_container_registered]
+    given:
+      - No container exists with reference "C-1001"
+      - An Excel packing list with 2 rows: (SKU-001, barcode B001, qty 250), (SKU-002, barcode B002, qty 120)
+    when: Admin uploads the file for container reference "C-1001"
+    then:
+      - HTTP 201 is returned
+      - A Container record exists with reference "C-1001"
+      - A PackingList is linked to that Container
+      - Exactly 2 PackingListItem rows exist with the given SKUs, barcodes and quantities
+      - Event PackingListUploaded is emitted
+      - Event ContainerRegistered is emitted
+
+  - id: SC-002
+    title: Re-uploading the same packing list updates rather than duplicates
+    traces_to: [be_container_registered]
+    given:
+      - Container "C-1001" already exists with 2 packing list items
+    when: Admin uploads a revised file for "C-1001" where SKU-001 quantity is 260
+    then:
+      - HTTP 200 is returned
+      - Still exactly one Container with reference "C-1001"
+      - Still exactly 2 PackingListItem rows (no duplication)
+      - SKU-001 quantity is 260
+    notes: >
+      Covers the "registers/updates" wording in the board. Idempotency matters
+      because suppliers re-send corrected packing lists.
+
+  - id: SC-003
+    title: Duplicate barcode within the same container is rejected
+    traces_to: [be_packing_list_uploaded]
+    given:
+      - An Excel packing list where two rows share barcode "B001"
+    when: Admin uploads the file for container "C-1002"
+    then:
+      - HTTP 422 is returned
+      - The response identifies the duplicated barcode "B001" and the offending row numbers
+      - No Container "C-1002" is persisted
+      - No partial PackingListItem rows are persisted
+    notes: Enforces the unique constraint (barcode, container_id). Must be transactional.
+
+  - id: SC-007
+    title: Only Admin may upload a packing list
+    traces_to: [be_packing_list_uploaded]
+    depends_on_schema_change: true
+    given:
+      - A user authenticated with the Worker role
+    when: They attempt to upload a packing list
+    then:
+      - HTTP 403 is returned
+      - Nothing is persisted
+    notes: >
+      REQUIRES A SCHEMA CHANGE. The starter's User model has no role field, so
+      the Architect must add one and the seed must produce at least one Admin
+      and one Worker. Flag this explicitly at Gate B — it is the one place this
+      slice extends the template's auth model.
+
+web_scenarios:
+
+  - id: WEB-001
+    title: Upload form renders and validates before submit
+    screen: /containers/upload
+    given: An Admin is on the packing list upload screen
+    when: They submit with no file selected
+    then:
+      - An inline validation message names the missing file
+      - No network request is made
+      - The submit button is disabled while no file is chosen
+
+  - id: WEB-005
+    title: Upload screen is keyboard accessible
+    screen: /containers/upload
+    given: An Admin using keyboard navigation only
+    when: They tab through the form
+    then:
+      - The file input and submit control are both reachable
+      - The file input has an associated label
+      - Error messages are announced (aria-live or role=alert)
+
+e2e_scenarios:
+
+  - id: E2E-001
+    title: Admin uploads a real packing list end to end and data persists
+    traces_to: [SC-001, WEB-002]
+    given:
+      - The stack is running; db:reset has run so only seeded users exist
+      - Signed in as john.doe@example.com (seeded, email-only login)
+    when: Admin uploads a valid 2-row .xlsx for container "C-1001" via the UI
+    then:
+      - The UI shows the success summary with 2 items
+      - Reloading the container detail page still shows both items (persisted)
+      - GET /containers/C-1001 returns 2 packing list items, ids exposed as `_id`
+
+test_data:
+  global_seed: >
+    Layer 1 only — the starter's `pnpm init-db:force` seeds 3 demo users. This
+    provides sign-in identity for E2E and nothing else.
+  domain_fixtures: >
+    Layer 2 — each test creates the domain rows it needs in its own arrange step.
+    We deliberately do NOT add a global domain seed: shared mutable state makes
+    tests order-dependent, and scenarios like SC-001 assert on an EMPTY starting
+    state.
+  isolation: >
+    `pnpm db:reset` before the suite gives an identical starting database every
+    run.
+  fixture_files: >
+    Files a test depends on (spreadsheets, images, exports) must be generated as
+    real files under apps/api/__tests__/fixtures/ — not mocked — whenever parsing
+    them is the behaviour under test.
+
+provisional_scenarios:
+
+  - id: SC-P01
+    title: Barcode-to-SKU match validation against a reference list
+    traces_to: [UC-003]
+    blocked_by: q_client_hardware_selection_pending
+    reason: >
+      The board marks this provisional pending a client decision. Do NOT
+      generate tests until the blocking question is answered.
+    status: blocked
+
+out_of_scope:
+  - id: be_count_synced
+    reason: Offline sync + dropout recovery is the hard 10% — human-implemented.
+  - id: ext_whatsapp
+    reason: Off-system file delivery channel, not a build integration.
+
+nfrs:
+  - id: NFR-ingest-atomic
+    statement: Ingestion is atomic — a rejected file leaves no partial rows.
+    verified_at: slice_gate
+    covered_by: [SC-003]

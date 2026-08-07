@@ -86,9 +86,21 @@ class S(TypedDict, total=False):
     usage: Annotated[Usage, _last]
     log: Annotated[list[str], lambda a, b: (a or []) + (b or [])]
 
+    pr_approved: Annotated[bool, _last]    # Gate C verdict — merge_slice reads it
+
 
 def _budget(state: S) -> float:
     return float(state["cfg"].get("budget_usd", 25.0))
+
+
+def _gate_policy(state: S, gate: str) -> str:
+    """
+    'human' (interrupt and wait) or 'auto' (record a driver approval with the
+    mechanical evidence and continue). Plain `run` never sets cfg["gates"], so
+    every gate stays human unless run-project (or run.json) says otherwise.
+    """
+    gates = state.get("cfg", {}).get("gates") or {}
+    return gates.get(gate, "human")
 
 
 def _log_path(state: S):
@@ -155,12 +167,23 @@ def gap_detect(state: S) -> dict:
 
 
 def gate_spec(state: S) -> dict:
+    underspecified = [g for g in state["gaps"]
+                      if g.get("verdict") == "underspecified"]
+    provisional = [s["id"] for s in
+                   state["scenarios"].get("provisional_scenarios", [])]
+    if _gate_policy(state, "spec") == "auto":
+        # The human accountability point moved up: the PROJECT PLAN was
+        # human-approved, and Gate C still reviews the delivered slice. What
+        # gets recorded here is the evidence a human reviewer would have seen.
+        note = (f"auto-approved per gate policy: {len(underspecified)} "
+                f"board-level gaps flagged (oracle authored against the "
+                f"approved plan), provisional held back: {provisional or 'none'}")
+        return {"log": [f"gate_A: {{'approved': True, 'by': 'gate-policy:auto', "
+                        f"'note': {note!r}}}"]}
     d = interrupt({
         "gate": "A — spec & scenarios (you are approving the ORACLE)",
-        "underspecified": [g for g in state["gaps"]
-                           if g.get("verdict") == "underspecified"],
-        "provisional_held_back": [s["id"] for s in
-                                  state["scenarios"].get("provisional_scenarios", [])],
+        "underspecified": underspecified,
+        "provisional_held_back": provisional,
         "ask": "Approve to proceed.",
     })
     return {"log": [f"gate_A: {d}"]}
@@ -287,6 +310,16 @@ def gate_contract(state: S) -> dict:
         s["id"] for group in ("scenarios", "web_scenarios", "e2e_scenarios")
         for s in sc.get(group, []) if s.get("depends_on_schema_change")
     ]
+    if _gate_policy(state, "contract") == "auto":
+        # contract_lint already passed (it is the node before this one and
+        # raises on failure) — that mechanical validation is the evidence.
+        note = ("auto-approved per gate policy: contract_lint ok"
+                + (f"; schema-extending scenarios: {needs_schema_change}"
+                   if needs_schema_change else "; purely additive schema"))
+        return {"log": [f"gate_B: {{'approved': True, 'by': 'gate-policy:auto', "
+                        f"'note': {note!r}}}"
+                        + (f" (schema-extending: {needs_schema_change})"
+                           if needs_schema_change else "")]}
     d = interrupt({
         "gate": "B — contract freeze",
         "contract": state["contract"][:4000],
@@ -546,15 +579,40 @@ def finish(state: S) -> dict:
 
 
 def gate_pr(state: S) -> dict:
-    d = interrupt({
+    payload = {
         "gate": "C — PR review",
         "status": state["status"], "parked": state.get("parked", []),
         "attempts": state["attempts"],
         "cost_usd": round(state["usage"].cost_usd, 2),
         "by_agent": {k: round(v, 3) for k, v in state["usage"].by_agent.items()},
         "ask": "Review the Draft PR; merge or push fixes.",
-    })
-    return {"log": [f"gate_C: {d}"]}
+    }
+    if _gate_policy(state, "pr") == "auto":
+        # Supported for completeness ("fully autonomous"), never a default:
+        # only a green, nothing-parked slice may pass unreviewed.
+        if state["status"] == "green" and not state.get("parked"):
+            return {"pr_approved": True,
+                    "log": ["gate_C: {'approved': True, 'by': 'gate-policy:auto', "
+                            "'note': 'green, nothing parked'}"]}
+        payload["ask"] = ("Slice is not clean (parked phases or non-green) — "
+                          "auto policy refuses it. Review and approve/reject.")
+    d = interrupt(payload)
+    return {"pr_approved": bool(d.get("approved")), "log": [f"gate_C: {d}"]}
+
+
+def merge_slice(state: S) -> dict:
+    """
+    Fold the approved slice back into main so the NEXT slice builds on
+    delivered code — run-project's cross-slice contract. Plain single-slice
+    runs keep today's behaviour (branch left for manual review) unless
+    merge_on_approval is set.
+    """
+    if not state["cfg"].get("merge_on_approval"):
+        return {"log": ["merge: skipped (merge_on_approval not set)"]}
+    if not state.get("pr_approved"):
+        return {"log": ["merge: skipped (Gate C did not approve)"]}
+    sha = repo_mod.merge_to_main(state["repo_path"], f"feat/{state['slice_id']}")
+    return {"log": [f"merge: feat/{state['slice_id']} -> main ({sha[:8]})"]}
 
 
 # =============================================================================
@@ -582,6 +640,7 @@ def build_graph(checkpointer=None, interrupt_after: list[str] | None = None):
         ("launch_stack", launch_stack), ("verify_e2e", verify_e2e),
         ("fix_e2e", fix_e2e), ("diagnose_e2e", diagnose_e2e), ("park_e2e", park_e2e),
         ("teardown", teardown), ("finish", finish), ("gate_pr", gate_pr),
+        ("merge_slice", merge_slice),
     ]
     for name, fn in nodes:
         g.add_node(name, fn)
@@ -620,7 +679,8 @@ def build_graph(checkpointer=None, interrupt_after: list[str] | None = None):
 
     g.add_edge("teardown", "finish")
     g.add_edge("finish", "gate_pr")
-    g.add_edge("gate_pr", END)
+    g.add_edge("gate_pr", "merge_slice")
+    g.add_edge("merge_slice", END)
     return g.compile(checkpointer=checkpointer,
                      interrupt_after=interrupt_after or [])
 

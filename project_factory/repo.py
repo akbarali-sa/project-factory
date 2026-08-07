@@ -145,6 +145,21 @@ def create_branch(repo: str, branch: str) -> None:
     _run(["git", "switch", "-c", branch], cwd=repo, check=False)
 
 
+def merge_to_main(repo: str, branch: str) -> str:
+    """
+    Fold an approved slice branch into main (--no-ff so the slice stays a
+    visible unit in history) and leave HEAD on main, so the next slice's
+    branch starts from delivered code. --no-verify: every commit being merged
+    already passed the hooks; the merge commit itself has nothing new to lint.
+    """
+    _run(["git", "switch", "main"], cwd=repo)
+    _run(["git", "-c", "user.name=project-factory",
+          "-c", "user.email=project-factory@local",
+          "merge", "--no-ff", "--no-verify", branch,
+          "-m", f"feat: merge {branch} (Gate C approved)"], cwd=repo)
+    return _run(["git", "rev-parse", "HEAD"], cwd=repo).stdout.strip()
+
+
 def open_draft_pr(repo: str, branch: str, title: str, body: str,
                   remote: str | None = None) -> str:
     """
