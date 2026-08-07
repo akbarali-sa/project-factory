@@ -242,6 +242,7 @@ button.link-btn {
 .log-line { display: flex; gap: 10px; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
 .log-line .ts { color: var(--accent); flex: none; opacity: 0.75; }
 .log-line .dur { color: var(--muted); flex: none; margin-left: auto; opacity: 0.8; font-size: 0.85em; padding-left: 10px; }
+.phase-metrics { color: var(--muted); flex: none; font-size: 0.85em; opacity: 0.85; white-space: nowrap; }
 .log-line.fail { color: var(--red); }
 .log-line.match { background: var(--accent-soft); border-radius: 4px; }
 .log-line.day-banner {

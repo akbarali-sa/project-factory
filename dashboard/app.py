@@ -185,6 +185,44 @@ def _status_payload(slug: str, slice_id: str) -> dict:
     thread = {"configurable": {"thread_id": project.thread_id(slice_id)}}
     with lock:
         snap = gapp.get_state(thread)
+        hist = list(gapp.get_state_history(thread))
+    hist.reverse()  # oldest -> newest
+
+    # Per-phase active time and cost. Each snapshot's new log lines identify
+    # the node that just completed; its active seconds (overlap with the
+    # live-log activity spans — same source of truth as the timeline) and its
+    # cost delta (checkpointed cumulative usage vs the previous snapshot) are
+    # attributed to the phase whose marker matches. Cost inherits the known
+    # undercount across crashed nodes — the live log's per-agent lines remain
+    # ground truth.
+    spans = _activity_spans(
+        project.dir / ".factory" / "live" / f"{slice_id}.log")
+    phase_active: dict[str, float] = {}
+    phase_cost: dict[str, float] = {}
+    _prev_len, _prev_dt, _prev_cost = 0, None, 0.0
+    for s in hist:
+        vals = s.values or {}
+        slog = vals.get("log") or []
+        new_lines = [_clean(l) for l in slog[_prev_len:]]
+        _prev_len = len(slog)
+        dur = 0.0
+        try:
+            sdt = datetime.fromisoformat(s.created_at)
+            if _prev_dt is not None:
+                dur = _active_overlap_s(spans, _prev_dt, sdt)
+            _prev_dt = sdt
+        except (TypeError, ValueError):
+            _prev_dt = None
+        cur_cost = getattr(vals.get("usage"), "cost_usd", None)
+        delta = 0.0
+        if cur_cost is not None:
+            delta = max(0.0, cur_cost - _prev_cost)
+            _prev_cost = cur_cost
+        pid = next((phase["id"] for line in new_lines for phase in PHASES
+                    if any(re.search(m, line) for m in phase["markers"])), None)
+        if pid is not None:
+            phase_active[pid] = phase_active.get(pid, 0.0) + dur
+            phase_cost[pid] = phase_cost.get(pid, 0.0) + delta
 
     values = snap.values or {}
     log = [_clean(l) for l in (values.get("log") or [])]
@@ -206,6 +244,10 @@ def _status_payload(slug: str, slice_id: str) -> dict:
     for phase in PHASES:
         status, detail = _phase_status(phase, log, parked)
         entry = {"id": phase["id"], "label": phase["label"], "status": status, "detail": detail}
+        if phase_active.get(phase["id"]):
+            entry["active_s"] = round(phase_active[phase["id"]])
+        if phase_cost.get(phase["id"], 0.0) >= 0.005:
+            entry["cost_usd"] = round(phase_cost[phase["id"]], 2)
         if phase["id"] in _DIAGNOSABLE:
             entry["attempts"] = attempts.get(phase["id"], 0)
             if diagnosis.get(phase["id"]):

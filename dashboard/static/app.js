@@ -423,6 +423,7 @@ function renderDetail(d) {
           ${p.detail ? `<div class="phase-detail">${escapeHtml(p.detail)}</div>` : ''}
         </div>
         ${p.attempts ? `<div class="phase-attempts">${p.attempts} attempt${p.attempts === 1 ? '' : 's'}</div>` : ''}
+        ${p.active_s || p.cost_usd ? `<div class="phase-metrics">${p.active_s ? fmtDuration(p.active_s) : ''}${p.active_s && p.cost_usd ? ' · ' : ''}${p.cost_usd ? '$' + p.cost_usd.toFixed(2) : ''}</div>` : ''}
         <div class="phase-status">${STATUS_LABEL[status] || ''}</div>
       </div>
       ${hasExtra ? `<div class="phase-extra">
