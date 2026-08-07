@@ -5,7 +5,7 @@
 // turn into N independent poll loops hammering Postgres.
 
 const STATUS_LABEL = { done: 'DONE', retrying: 'RETRYING', parked: 'PARKED', pending: 'PENDING', current: 'RUNNING' };
-const PILL_LABEL = { running: 'Running', gate: 'Gate pending', parked: 'Parked', done: 'Done', idle: 'Not started', paused: 'Paused' };
+const PILL_LABEL = { running: 'Running', gate: 'Gate pending', parked: 'Parked', done: 'Done', idle: 'Not started', paused: 'Paused', planned: 'Planned' };
 
 const state = {
   projects: [],
@@ -209,8 +209,9 @@ function renderOverview(projects) {
         <div class="name">${escapeHtml(p.slug)}</div>
         <div class="count">${p.slices.length} slice${p.slices.length === 1 ? '' : 's'}</div>
       </div>
+      ${p.project ? renderProjectBanner(p.slug, p.project) : ''}
       ${p.error ? `<div class="empty-note">${escapeHtml(p.error)}</div>` : p.slices.map(s => `
-        <div class="slice-row" onclick="goDetail('${escapeAttr(p.slug)}','${escapeAttr(s.id)}')">
+        <div class="slice-row${s.planned_only ? ' planned-only' : ''}"${s.planned_only ? '' : ` onclick="goDetail('${escapeAttr(p.slug)}','${escapeAttr(s.id)}')"`}>
           <div class="pip ${s.status_label}"></div>
           <div class="info">
             <div class="sname">${escapeHtml(s.name)} <span style="color:var(--muted); font-weight:400;">· wave ${s.wave}</span></div>
@@ -233,6 +234,53 @@ function renderOverview(projects) {
   `).join('');
 }
 function escapeAttr(s) { return String(s).replace(/'/g, "\\'"); }
+
+// -------------------------------------------------------------- run-project
+function renderProjectBanner(slug, pj) {
+  const pct = pj.project_budget_usd ? Math.min(pj.spent_usd / pj.project_budget_usd * 100, 100) : 0;
+  const running = pj.runner && pj.runner.running;
+  const planState = pj.approved
+    ? `plan approved by ${escapeHtml(pj.approved_by || '?')}`
+    : 'plan awaiting approval';
+  return `
+    <div class="project-banner" onclick="event.stopPropagation()">
+      <div class="pb-row">
+        <span class="pb-plan ${pj.approved ? 'ok' : 'pending'}">${planState}</span>
+        <span class="pb-progress">${pj.completed}/${pj.total_slices} slices done</span>
+        <span class="pb-spacer"></span>
+        ${pj.approved
+          ? `<button class="btn" ${running ? 'disabled' : ''} onclick="runProject('${escapeAttr(slug)}')">${running ? 'project running…' : (pj.completed ? 'Continue project ▶' : 'Run project ▶')}</button>`
+          : `<button class="btn btn-primary" onclick="approvePlanUI('${escapeAttr(slug)}')">Approve plan ✓</button>`}
+      </div>
+      <div class="pb-budget">
+        <div class="pb-budget-bar"><div class="pb-budget-fill${pct > 85 ? ' hot' : ''}" style="width:${pct.toFixed(1)}%"></div></div>
+        <span class="pb-budget-label">$${pj.spent_usd.toFixed(2)} / $${pj.project_budget_usd.toFixed(0)} project budget</span>
+      </div>
+    </div>`;
+}
+
+async function runProject(slug) {
+  try {
+    const r = await fetch(`/api/projects/${encodeURIComponent(slug)}/run-project`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    if (!r.ok) alert((await r.json()).detail || `run-project failed (${r.status})`);
+  } catch (e) { alert('run-project failed: ' + e); }
+  fetchOverview();
+}
+
+async function approvePlanUI(slug) {
+  const by = prompt('Plan approval is the project-level gate and must be attributable.\nYour name:');
+  if (!by) return;
+  try {
+    const r = await fetch(`/api/projects/${encodeURIComponent(slug)}/plan/approve`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ by }),
+    });
+    if (!r.ok) alert((await r.json()).detail || `approve failed (${r.status})`);
+  } catch (e) { alert('approve failed: ' + e); }
+  fetchOverview();
+}
 
 function setConn(ok) {
   const b = document.getElementById('conn-badge');
@@ -784,10 +832,13 @@ async function createProject() {
 
   const body = { slug, slice_name: sliceName || null, ...boardBody() };
   body.db_reset_consent = document.getElementById('np-consent').checked;
+  const projectMode = document.getElementById('np-project-mode').checked;
+  if (projectMode) body.project_mode = true;
 
   // Which of the board's slices to scaffold — checked boxes only. With
   // candidates on screen but none ticked, that's a mistake, not "all".
-  if (npCandidates.length) {
+  // Irrelevant in project mode: the planner owns slicing there.
+  if (!projectMode && npCandidates.length) {
     const picked = [...document.querySelectorAll('.np-slice-check:checked')].map(el => el.dataset.bc);
     if (!picked.length) { status.textContent = 'select at least one slice (or clear the board to use a blank template)'; return; }
     body.slices = picked;
@@ -805,6 +856,7 @@ async function createProject() {
     ['np-slug', 'np-board-path', 'np-board-json', 'np-slice-name'].forEach(id => { document.getElementById(id).value = ''; });
     document.getElementById('np-board-file').value = '';
     document.getElementById('np-consent').checked = false;
+    document.getElementById('np-project-mode').checked = false;
     npCandidates = [];
     setNpBoardFile(null);
     state.projects = [];  // force switcher refresh

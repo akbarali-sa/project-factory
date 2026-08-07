@@ -23,6 +23,7 @@ import datetime
 import json
 import os
 import pathlib
+import re
 import select
 import subprocess
 import time
@@ -37,6 +38,23 @@ def path_for(project_dir: str, slice_id: str) -> pathlib.Path:
 
 def _day_marker_path(log_path: pathlib.Path) -> pathlib.Path:
     return log_path.with_suffix(log_path.suffix + ".day")
+
+
+_AGENT_COST = re.compile(r"✓ \w+ done in \d+s \(\$(\d+\.\d+)\)")
+
+
+def live_log_cost(project_dir: str, slice_id: str) -> float:
+    """
+    Ground-truth spend for a slice: the sum of every completed agent's
+    '✓ <agent> done in Ns ($X.XXX)' line in the live log. The checkpointed
+    Usage counter loses any node that raises AFTER its agent call completed
+    (the state update never commits), so it is a floor — this is the total.
+    """
+    p = pathlib.Path(project_dir) / ".factory" / "live" / f"{slice_id}.log"
+    if not p.exists():
+        return 0.0
+    return round(sum(float(m.group(1))
+                     for m in _AGENT_COST.finditer(p.read_text())), 2)
 
 
 def reset(project_dir: str, slice_id: str) -> None:

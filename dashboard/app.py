@@ -590,6 +590,28 @@ def create_project(body: dict = Body(...)):
         raise HTTPException(400, "provide board_path (a .board.json file) or board_json — "
                                  "this project has no board yet")
 
+    # Project mode ("run the whole board"): no seeded slice files at all —
+    # the planner derives slices and the oracle_author drafts each scenarios
+    # file. Mirrors `new --project` on the CLI.
+    if (body or {}).get("project_mode") is True:
+        specs.mkdir(parents=True, exist_ok=True)
+        if board is not None and not has_board:
+            name = board_filename if (board_filename or "").endswith(".board.json") \
+                else f"{slug}.board.json"
+            with tempfile.TemporaryDirectory() as td:
+                tmp = pathlib.Path(td) / name
+                tmp.write_text(json.dumps(board, indent=2))
+                project = cfgmod.scaffold(slug, str(tmp), project_mode=True)
+        else:
+            project = cfgmod.scaffold(slug, None, project_mode=True)
+        consent_written = False
+        if (body or {}).get("db_reset_consent") is True:
+            consent_written = cfgmod.record_db_reset_consent(project)
+        return {"slug": slug, "created": not existed, "dir": str(project.dir),
+                "board": project.board_path.name, "project_mode": True,
+                "db_reset_consent_written": consent_written,
+                "next": f"POST /api/projects/{slug}/run-project"}
+
     # Which slices to scaffold: the client sends the bounded-context names it
     # selected; we re-derive the candidates server-side from the board rather
     # than trusting client-sent event lists. No selection sent -> all of them.
@@ -748,7 +770,34 @@ def overview():
                                "cost_usd": 0.0, "budget_usd": project.cfg.get("budget_usd", 25.0),
                                "gate": None, "parked": [], "next": [], "detail": "not started",
                                "stack": None})
-        out.append({"slug": slug, "error": None, "slices": slices})
+
+        # Project mode: planned slices whose oracle isn't drafted yet have no
+        # Slice object — surface them as ghosts so the grid shows the whole
+        # project, plus the plan/budget header data.
+        proj_block = None
+        from project_factory import planner as planmod
+        plan = planmod.load_plan(project)
+        if plan and plan.get("slices"):
+            have = {s["id"] for s in slices}
+            planned_only = [
+                {"id": p["id"], "name": p.get("name", p["id"]), "wave": p["wave"],
+                 "status_label": "planned", "progress_pct": 0, "cost_usd": 0.0,
+                 "budget_usd": None, "gate": None, "parked": [], "next": [],
+                 "detail": "oracle not drafted yet", "stack": None, "planned_only": True}
+                for p in sorted(plan["slices"], key=lambda x: (x["wave"], x["id"]))
+                if p["id"] not in have]
+            slices.extend(planned_only)
+            proj_block = {
+                "approved": planmod.plan_is_approved(plan),
+                "approved_by": plan.get("approved_by"),
+                "total_slices": len(plan["slices"]),
+                "completed": len(project.state.get("completed_slices", [])),
+                "project_budget_usd": float(project.cfg.get("project_budget_usd", 100.0)),
+                "spent_usd": project.spent_usd(),
+                "runner": runner.get_state(str(project.dir), "project"),
+            }
+        out.append({"slug": slug, "error": None, "slices": slices,
+                    "project": proj_block})
     return out
 
 
@@ -783,6 +832,56 @@ def api_start_run(slug: str, slice_id: str, body: dict = Body(default={})):
 def api_stop_run(slug: str, slice_id: str):
     project = _project_or_404(slug)
     return runner.stop(str(project.dir), slice_id)
+
+
+@app.get("/api/projects/{slug}/plan")
+def api_get_plan(slug: str):
+    """The project plan plus drafting status per planned slice — what the
+    project header renders."""
+    from project_factory import planner as planmod
+    project = _project_or_404(slug)
+    plan = planmod.load_plan(project)
+    if not plan:
+        return {"plan": None}
+    slices = []
+    for s in sorted(plan.get("slices", []), key=lambda x: (x["wave"], x["id"])):
+        drafted = planmod.scenarios_path_for(project, s["id"]).exists()
+        slices.append({**s, "drafted": drafted,
+                       "completed": s["id"] in set(project.state.get("completed_slices", []))})
+    return {"plan": {**plan, "slices": slices},
+            "approved": planmod.plan_is_approved(plan),
+            "project_budget_usd": float(project.cfg.get("project_budget_usd", 100.0)),
+            "spent_usd": project.spent_usd(),
+            "runner": runner.get_state(str(project.dir), "project")}
+
+
+@app.post("/api/projects/{slug}/plan/approve")
+def api_approve_plan(slug: str, body: dict = Body(...)):
+    """The project-level gate. `by` is required — approval must be
+    attributable, same contract as approve-plan on the CLI."""
+    from project_factory import planner as planmod
+    project = _project_or_404(slug)
+    by = (body or {}).get("by") or ""
+    if not by:
+        raise HTTPException(400, "plan approval requires 'by'")
+    try:
+        plan = planmod.approve_plan(project, by)
+    except planmod.PlanError as e:
+        raise HTTPException(409, str(e)) from e
+    return {"plan": plan, "approved": True}
+
+
+@app.post("/api/projects/{slug}/run-project")
+def api_run_project(slug: str, body: dict = Body(default={})):
+    """Plan (first call), or advance the project as far as it can go —
+    the button behind the whole board-to-repo flow."""
+    project = _project_or_404(slug)
+    try:
+        return runner.start_run_project(
+            str(FACTORY_ROOT), str(project.dir), slug,
+            gates=(body or {}).get("gates") or None)
+    except runner.RunnerError as e:
+        raise HTTPException(409, str(e)) from e
 
 
 @app.post("/api/projects/{slug}/slices/{slice_id}/gate")

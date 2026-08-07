@@ -62,7 +62,7 @@ NODE_ORDER = [
     "implement_api", "verify_api",
     "implement_web", "verify_web",
     "launch_stack", "verify_e2e",
-    "teardown", "finish", "gate_pr",
+    "teardown", "finish", "gate_pr", "merge_slice",
 ]
 
 # Rungs of the cheap-first ladder, with what each one buys you.
@@ -83,6 +83,17 @@ BUILT_IN_DEFAULTS: dict[str, Any] = {
     "api_port": 3001,
     "web_port": 3000,
     "budget_usd": 25.0,
+    # Whole-project ceiling for run-project (all slices + planning + oracle
+    # drafting). Each slice thread receives the REMAINING balance as its
+    # per-run budget_usd, so one runaway slice can't eat the project.
+    "project_budget_usd": 100.0,
+    # Gate policy: who answers each gate. "human" interrupts and waits; "auto"
+    # records a driver approval with the mechanical evidence (gap counts /
+    # contract lint) and continues. The safe default is all-human — run-project
+    # overlays PROJECT_GATE_POLICY (auto A+B, human C) unless run.json or
+    # --gates says otherwise. Gate C should stay human: merged code is the one
+    # artifact someone must have looked at.
+    "gates": {"spec": "human", "contract": "human", "pr": "human"},
     "keep_stack_running": True,
     "keep_db": True,
     "jwt_secret": "project-factory-local-dev-secret-not-for-production",
@@ -94,6 +105,9 @@ BUILT_IN_DEFAULTS: dict[str, Any] = {
         "postgresql://postgres:postgres@localhost:5432/project_factory_state",
     "git_remote": None,
 }
+
+# What run-project overlays when neither run.json nor --gates set a policy.
+PROJECT_GATE_POLICY = {"spec": "auto", "contract": "auto", "pr": "human"}
 
 
 def slugify(name: str) -> str:
@@ -230,6 +244,23 @@ class Project:
         if slice_id not in done:
             done.append(slice_id)
         self.state["completed_slices"] = done
+        self._write_state()
+
+    # -- project-level accounting (run-project) ------------------------------
+    def record_slice_cost(self, slice_id: str, usd: float) -> None:
+        """Ground-truth cost per delivered slice. Callers should prefer the
+        live-log sum over the checkpoint counter — a node that crashes loses
+        its usage update, so the checkpoint is a floor, not a total."""
+        costs = dict(self.state.get("slice_costs", {}))
+        costs[slice_id] = round(max(usd, costs.get(slice_id, 0.0)), 2)
+        self.state["slice_costs"] = costs
+        self._write_state()
+
+    def spent_usd(self) -> float:
+        """Recorded project spend across completed/attempted slices."""
+        return round(sum(self.state.get("slice_costs", {}).values()), 2)
+
+    def _write_state(self) -> None:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         self.state_file.write_text(json.dumps(self.state, indent=2) + "\n")
 
@@ -268,10 +299,14 @@ def discover(slug: str, workspace: str | None = None) -> Project:
             + "\n  ".join(b.name for b in boards))
 
     slice_files = sorted(specs.glob("*.scenarios.y*ml"))
-    if not slice_files:
+    if not slice_files and not (specs / "project-plan.json").exists():
+        # run-project drafts scenario files from the plan as it goes, so a
+        # board + plan with zero scenario files is a legitimate state. Without
+        # either, there is nothing to build from.
         raise ConfigError(
             f"no *.scenarios.yaml in {specs}\n"
-            f"  a slice file must define slice.id and at least one scenario")
+            f"  a slice file must define slice.id and at least one scenario\n"
+            f"  (or run `run-project {slug}` to plan slices from the board)")
 
     slices: list[Slice] = []
     for f in slice_files:
@@ -386,7 +421,13 @@ def seeded_scenarios_yaml(slice_id: str, name: str, wave: int,
 
 
 def scaffold(slug: str, board: str | None, workspace: str | None = None,
-             slice_name: str | None = None) -> Project:
+             slice_name: str | None = None, project_mode: bool = False) -> Project:
+    """
+    project_mode (new --project / run-project): no placeholder scenarios file —
+    the planner derives slices from the board and the oracle_author drafts each
+    scenarios file. run.json carries the project budget instead of a per-slice
+    one. An empty specs/ except the board is the intended starting state.
+    """
     ws = resolve_workspace(workspace)
     pdir = ws / slug
     (pdir / "specs").mkdir(parents=True, exist_ok=True)
@@ -398,19 +439,32 @@ def scaffold(slug: str, board: str | None, workspace: str | None = None,
         name = src.name if src.name.endswith(".board.json") else f"{slug}.board.json"
         (pdir / "specs" / name).write_bytes(src.read_bytes())
 
-    sid = slugify(slice_name or "slice-001").replace("-", "_")
-    sfile = pdir / "specs" / f"{slugify(slice_name or 'slice-001')}.scenarios.yaml"
-    if not sfile.exists():
-        sfile.write_text(SCENARIOS_TEMPLATE.format(slice_id=sid))
+    if project_mode:
+        # Written empty-but-present so discover() accepts the project before
+        # the planner has produced the real plan.
+        pp = pdir / "specs" / "project-plan.json"
+        if not pp.exists():
+            pp.write_text(json.dumps({"slices": [], "out_of_scope": [],
+                                      "approved_by": None, "approved_at": None},
+                                     indent=2) + "\n")
+    else:
+        sid = slugify(slice_name or "slice-001").replace("-", "_")
+        sfile = pdir / "specs" / f"{slugify(slice_name or 'slice-001')}.scenarios.yaml"
+        if not sfile.exists():
+            sfile.write_text(SCENARIOS_TEMPLATE.format(slice_id=sid))
 
     run_file = pdir / "run.json"
     if not run_file.exists():
-        run_file.write_text(json.dumps({
+        overrides: dict[str, Any] = {
             "_comment": ("Per-project OVERRIDES only. Everything else comes from "
                          "the factory's defaults.json. Paths are discovered from "
                          "specs/ — do not list them here."),
-            "budget_usd": BUILT_IN_DEFAULTS["budget_usd"],
-        }, indent=2) + "\n")
+        }
+        if project_mode:
+            overrides["project_budget_usd"] = BUILT_IN_DEFAULTS["project_budget_usd"]
+        else:
+            overrides["budget_usd"] = BUILT_IN_DEFAULTS["budget_usd"]
+        run_file.write_text(json.dumps(overrides, indent=2) + "\n")
 
     return discover(slug, workspace)
 

@@ -87,6 +87,20 @@ def start_run(factory_root: str, project_dir: str, slug: str, slice_id: str,
     return _launch(factory_root, project_dir, slice_id, argv)
 
 
+def start_run_project(factory_root: str, project_dir: str, slug: str,
+                      gates: str | None = None) -> dict:
+    """
+    Launch `run-project <slug>` detached. It logs to the 'project' live log
+    (planning + oracle drafting) and each slice it drives then logs to that
+    slice's own live log via the per-slice run locks it acquires — the
+    'project' pidfile here only guards against two concurrent run-projects.
+    """
+    argv = ["run-project", slug]
+    if gates:
+        argv += ["--gates", gates]
+    return _launch(factory_root, project_dir, "project", argv)
+
+
 def start_approve(factory_root: str, project_dir: str, slug: str, slice_id: str, *,
                    reject: bool = False, note: str = "", by: str = "") -> dict:
     argv = ["approve", slug, "--slice", slice_id]
