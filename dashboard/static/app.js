@@ -22,6 +22,7 @@ const state = {
   notify: localStorage.getItem('pf-notify') === '1',
   logFilter: '',
   logAutoscroll: true,
+  timelineSig: '',
   liveLines: [],
   liveFilter: '',
   liveAutoscroll: true,
@@ -173,6 +174,7 @@ function showOverviewView() {
 }
 
 async function fetchOverview() {
+  if (document.hidden) return;   // background tabs neither fetch nor render
   try {
     const res = await fetch('/api/overview');
     const data = await res.json();
@@ -387,12 +389,56 @@ function connectLiveStream(slug, sliceId) {
     const line = JSON.parse(ev.data);
     state.liveLines.push(line);
     if (state.liveLines.length > 2000) state.liveLines.shift();
-    renderLive();
+    if (livePending.length < 2000) livePending.push(line);  // beyond this a
+    // full rebuild from liveLines covers it — see flushLive
+    scheduleLiveRender();
     markActive();
   };
   es.onerror = () => setLiveBadge('idle');
   state.liveEs = es;
 }
+
+// Coalesce live-log rendering: agent bursts (and the initial file replay on
+// connect) deliver hundreds of SSE lines per second — one full innerHTML
+// rebuild per line froze the tab. Instead: batch per animation frame, and on
+// the common append-only path insert ONLY the new lines, trimming from the
+// top. Full rebuilds are reserved for filter/clear/reconnect.
+let livePending = [];
+let liveRenderQueued = false;
+
+function scheduleLiveRender() {
+  if (liveRenderQueued) return;
+  liveRenderQueued = true;
+  requestAnimationFrame(() => {
+    liveRenderQueued = false;
+    if (document.hidden) return;   // flushed by the visibilitychange handler
+    flushLive();
+  });
+}
+
+function liveLineHtml(l) {
+  if (DAY_BANNER_RE.test(l.trim())) return `<div class="log-line day-banner">${escapeHtml(l.trim())}</div>`;
+  return `<div class="log-line ${/FAIL|✗|failed/.test(l) ? 'fail' : ''}">${escapeHtml(l)}</div>`;
+}
+
+function flushLive() {
+  const batch = livePending;
+  livePending = [];
+  if (!batch.length) return;
+  // Filtered view, or a backlog bigger than the window itself (a tab left
+  // hidden accumulates without rAF): one bounded full rebuild beats a
+  // mega-append. state.liveLines is already capped at 2000.
+  if (state.liveFilter.trim() || batch.length >= 500) { renderLive(); return; }
+  const el = document.getElementById('live-log');
+  if (el.dataset.empty === '1') { el.innerHTML = ''; el.dataset.empty = '0'; }
+  el.insertAdjacentHTML('beforeend', batch.map(liveLineHtml).join(''));
+  while (el.children.length > 2000) el.removeChild(el.firstChild);
+  if (state.liveAutoscroll) el.scrollTop = el.scrollHeight;
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) flushLive();
+});
 
 function setLiveBadge(mode) {
   const b = document.getElementById('live-badge');
@@ -405,13 +451,13 @@ function setLiveBadge(mode) {
 const DAY_BANNER_RE = /^─+\s*\d{4}-\d{2}-\d{2}\s*─+$/;
 
 function renderLive() {
+  livePending = [];   // a full rebuild covers anything queued for append
   const filter = state.liveFilter.trim().toLowerCase();
   const lines = filter ? state.liveLines.filter(l => l.toLowerCase().includes(filter)) : state.liveLines;
   const el = document.getElementById('live-log');
-  el.innerHTML = lines.map(l => {
-    if (DAY_BANNER_RE.test(l.trim())) return `<div class="log-line day-banner">${escapeHtml(l.trim())}</div>`;
-    return `<div class="log-line ${/FAIL|✗|failed/.test(l) ? 'fail' : ''}">${escapeHtml(l)}</div>`;
-  }).join('') || '<div class="log-line">(nothing yet — populated once a `run` process is actively working this slice)</div>';
+  const html = lines.map(liveLineHtml).join('');
+  el.dataset.empty = html ? '0' : '1';
+  el.innerHTML = html || '<div class="log-line">(nothing yet — populated once a `run` process is actively working this slice)</div>';
   if (state.liveAutoscroll) el.scrollTop = el.scrollHeight;
 }
 
@@ -694,7 +740,7 @@ function stopTimelinePolling() {
   if (state.timelineTimer) { clearInterval(state.timelineTimer); state.timelineTimer = null; }
 }
 async function fetchTimeline() {
-  if (!state.slug || !state.sliceId) return;
+  if (!state.slug || !state.sliceId || document.hidden) return;
   try {
     const res = await fetch(`/api/projects/${encodeURIComponent(state.slug)}/slices/${encodeURIComponent(state.sliceId)}/timeline`);
     if (!res.ok) return;
@@ -714,8 +760,14 @@ function renderTimeline(t) {
   if (t.last_update_at) metaBits.push(`last update ${timeAgo(t.last_update_at)}`);
   document.getElementById('elapsed-meta').textContent = metaBits.join(' · ');
 
-  state.timelineEvents = t.events || [];
-  renderLog();
+  const events = t.events || [];
+  // Skip the (expensive) full-history rebuild when nothing changed — the
+  // 5s poll usually returns an identical list while a long agent step runs.
+  const sig = events.length + ':' + (events.length ? events[events.length - 1].ts : '');
+  const changed = sig !== state.timelineSig;
+  state.timelineSig = sig;
+  state.timelineEvents = events;
+  if (changed) renderLog();
 }
 function renderLog() {
   const events = state.timelineEvents || [];
