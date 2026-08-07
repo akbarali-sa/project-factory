@@ -774,11 +774,15 @@ def overview():
         # Project mode: planned slices whose oracle isn't drafted yet have no
         # Slice object — surface them as ghosts so the grid shows the whole
         # project, plus the plan/budget header data.
+        # The plan FILE's existence marks project mode — an EMPTY plan (just
+        # scaffolded, planner not run yet) must still render the banner, or
+        # the card has no way to start planning at all.
         proj_block = None
         from project_factory import planner as planmod
         plan = planmod.load_plan(project)
-        if plan and plan.get("slices"):
+        if plan is not None:
             have = {s["id"] for s in slices}
+            plan.setdefault("slices", [])
             planned_only = [
                 {"id": p["id"], "name": p.get("name", p["id"]), "wave": p["wave"],
                  "status_label": "planned", "progress_pct": 0, "cost_usd": 0.0,

@@ -239,18 +239,23 @@ function escapeAttr(s) { return String(s).replace(/'/g, "\\'"); }
 function renderProjectBanner(slug, pj) {
   const pct = pj.project_budget_usd ? Math.min(pj.spent_usd / pj.project_budget_usd * 100, 100) : 0;
   const running = pj.runner && pj.runner.running;
-  const planState = pj.approved
-    ? `plan approved by ${escapeHtml(pj.approved_by || '?')}`
+  // Three states: no plan yet (planner hasn't run) → Plan project;
+  // plan exists unapproved → Approve plan; approved → Run/Continue.
+  const planState = !pj.total_slices ? 'not planned yet'
+    : pj.approved ? `plan approved by ${escapeHtml(pj.approved_by || '?')}`
     : 'plan awaiting approval';
+  const button = !pj.total_slices
+    ? `<button class="btn btn-primary" ${running ? 'disabled' : ''} onclick="runProject('${escapeAttr(slug)}')">${running ? 'planning…' : 'Plan project ▶'}</button>`
+    : pj.approved
+      ? `<button class="btn" ${running ? 'disabled' : ''} onclick="runProject('${escapeAttr(slug)}')">${running ? 'project running…' : (pj.completed ? 'Continue project ▶' : 'Run project ▶')}</button>`
+      : `<button class="btn btn-primary" onclick="approvePlanUI('${escapeAttr(slug)}')">Approve plan ✓</button>`;
   return `
     <div class="project-banner" onclick="event.stopPropagation()">
       <div class="pb-row">
         <span class="pb-plan ${pj.approved ? 'ok' : 'pending'}">${planState}</span>
-        <span class="pb-progress">${pj.completed}/${pj.total_slices} slices done</span>
+        ${pj.total_slices ? `<span class="pb-progress">${pj.completed}/${pj.total_slices} slices done</span>` : ''}
         <span class="pb-spacer"></span>
-        ${pj.approved
-          ? `<button class="btn" ${running ? 'disabled' : ''} onclick="runProject('${escapeAttr(slug)}')">${running ? 'project running…' : (pj.completed ? 'Continue project ▶' : 'Run project ▶')}</button>`
-          : `<button class="btn btn-primary" onclick="approvePlanUI('${escapeAttr(slug)}')">Approve plan ✓</button>`}
+        ${button}
       </div>
       <div class="pb-budget">
         <div class="pb-budget-bar"><div class="pb-budget-fill${pct > 85 ? ' hot' : ''}" style="width:${pct.toFixed(1)}%"></div></div>
