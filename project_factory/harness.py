@@ -227,18 +227,21 @@ def check_contract(contract: str, scenarios: dict, repo: str) -> Result:
     if errors:
         return Result(False, errors=errors)
 
-    # 4a. prisma validate on the SPLICED schema — the same document migrate()
-    # will write. Validating the contract's block alone false-positives from
-    # the second slice on: a contract legitimately references models/enums it
-    # does not redeclare (they already live in the repo's schema).
+    # The SPLICED schema — the same document migrate() will write — is what
+    # every schema check below must reason about. Judging the contract's block
+    # in isolation false-positives from the second slice on: a contract
+    # legitimately references (and does not redeclare) models, enums and
+    # aggregates that already live in the repo's schema.
+    base = pathlib.Path(repo) / "apps/api/prisma/schema.prisma"
+    if base.exists():
+        merged = splice_schema(base.read_text(), prisma.group(1))
+    else:
+        # No repo schema yet (unit tests, dry validation): fall back to the
+        # contract block alone, which then must be self-contained.
+        merged = prisma.group(1)
+
+    # 4a. prisma validate
     with tempfile.TemporaryDirectory() as td:
-        base = pathlib.Path(repo) / "apps/api/prisma/schema.prisma"
-        if base.exists():
-            merged = splice_schema(base.read_text(), prisma.group(1))
-        else:
-            # No repo schema yet (unit tests, dry validation): fall back to
-            # the contract block alone, which then must be self-contained.
-            merged = prisma.group(1)
         tmp = pathlib.Path(td) / "schema.prisma"
         tmp.write_text(merged)
 
@@ -259,9 +262,11 @@ def check_contract(contract: str, scenarios: dict, repo: str) -> Result:
         if p.returncode != 0:
             errors.append(f"prisma validate failed: {(p.stdout + p.stderr)[-800:]}")
 
-    # 4b. every aggregate has a model
+    # 4b. every aggregate has a model — in the spliced schema, so an aggregate
+    # a later slice merely READS (wave 1's PackingList/PackingListItem, say)
+    # counts as satisfied without forcing a pointless redeclaration.
     for agg in scenarios["aggregates"]:
-        if not re.search(rf"model\s+{agg}\b", prisma.group(1)):
+        if not re.search(rf"model\s+{agg}\b", merged):
             errors.append(f"aggregate '{agg}' has no Prisma model")
 
     # 4c. scenarios imply status codes -> contract must declare them

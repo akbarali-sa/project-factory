@@ -278,6 +278,25 @@ class SpliceSchemaTests(unittest.TestCase):
         self.assertIn("model CountEntry {", out)
 
 
+class AggregateCheckTests(unittest.TestCase):
+    """4b must judge the SPLICED schema too: a later slice's oracle lists
+    aggregates it only reads (wave 1's PackingList), and forcing a pointless
+    redeclaration to satisfy the lint is exactly the wrong incentive."""
+
+    def test_aggregate_satisfied_by_existing_repo_model(self) -> None:
+        from project_factory.harness import splice_schema
+        existing = (
+            'generator client { provider = "prisma-client-js" }\n\n'
+            "model PackingList {\n  id String @id\n}\n\n"
+            "model PackingListItem {\n  id String @id\n}\n"
+        )
+        # Slice 3's contract adds only its own model.
+        merged = splice_schema(existing, "model ContainerProgress {\n  id String @id\n}")
+        for agg in ("PackingList", "PackingListItem", "ContainerProgress"):
+            with self.subTest(aggregate=agg):
+                self.assertRegex(merged, rf"model\s+{agg}\b")
+
+
 class RerunIdempotencyTests(unittest.TestCase):
     """A reused repo (new thread generation / crashed-slice retry) re-runs
     commit_specs and create_branch — both must tolerate already-done work."""
