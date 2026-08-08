@@ -430,6 +430,14 @@ def stop_stack() -> None:
         _processes.pop(name, None)
 
 
+# The e2e suite GROWS with every delivered slice — each one adds its own specs
+# and they all run against the merged app (that cumulative regression net is the
+# point). A fixed ceiling that fit slice 1 (44 tests) killed slice 2 mid-run
+# (76 tests, failures retried), and the kill looks exactly like a hang. Scale
+# generously; a real hang is caught by the timeout either way, just later.
+E2E_TIMEOUT_S = 7200
+
+
 @dataclass
 class E2EResult:
     ok: bool
@@ -439,7 +447,8 @@ class E2EResult:
 
 def run_e2e(repo: str, stack: Stack, grep: str | None = None,
            consent: str | None = None,
-           log_path: pathlib.Path | None = None) -> E2EResult:
+           log_path: pathlib.Path | None = None,
+           timeout: int = E2E_TIMEOUT_S) -> E2EResult:
     """
     Playwright via the starter's own script. Pin the Playwright version in
     package.json or browser behaviour drifts between machines.
@@ -458,10 +467,10 @@ def run_e2e(repo: str, stack: Stack, grep: str | None = None,
     env = {"TZ": "UTC", "NEXT_PUBLIC_WEB_URL": stack.web_url, "NEXT_PUBLIC_API_URL": stack.api_url,
            **_consent_env(consent)}
     if log_path is not None:
-        p = livelog.tee_subprocess(cmd, cwd=repo, env=env, timeout=2400,
+        p = livelog.tee_subprocess(cmd, cwd=repo, env=env, timeout=timeout,
                                    check=False, log_path=log_path)
     else:
-        p = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, timeout=2400,
+        p = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, timeout=timeout,
                            env={**os.environ, **env})
     out = (p.stdout or "") + (getattr(p, "stderr", "") or "")
     if p.returncode != 0:
