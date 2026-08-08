@@ -102,7 +102,15 @@ def _report(res: dict, project, chosen) -> int:
     if truth:
         project.record_slice_cost(chosen.id, truth)
 
-    if status == "green":
+    # A Gate C approval on a PARKED slice is the human override — someone
+    # reviewed the branch (typically after hand-fixing the parked phase) and
+    # accepted it. Treat it as delivered; refusing it here would strand every
+    # human-rescued slice one step from done.
+    accepted = status == "green" or bool(res.get("pr_approved"))
+    if accepted:
+        if status != "green":
+            print("parked but Gate-C-approved — accepting as delivered "
+                  "(human override recorded in the gate note)")
         project.mark_completed(chosen.id)
         print(f"recorded in {project.state_file}")
         nxt = project.next_slice()
@@ -254,8 +262,11 @@ def _cmd_approve(args) -> int:
         print(f"\nresuming with: {json.dumps(decision)}\n")
 
         # Same cfg refresh as _cmd_run's resume path: a human may have edited
-        # run.json while the slice sat at this gate.
-        app.update_state(thread, {"cfg": project.cfg})
+        # run.json while the slice sat at this gate. In project mode the
+        # run-project overlay (gate policy, merge_on_approval, remaining
+        # budget) must survive the refresh — a bare project.cfg silently
+        # turns merge_slice into a no-op right when Gate C approves.
+        app.update_state(thread, {"cfg": _resume_cfg(project)})
 
         try:
             livelog.acquire_run_lock(str(project.dir), chosen.id, cmd=sys.argv)
@@ -384,8 +395,8 @@ def _cmd_run(args) -> int:
             # paused (add db_reset_consent, raise budget_usd) — resuming with
             # the stale checkpointed copy silently ignores those edits, which
             # reads as "the fix didn't work". Refresh cfg from disk on every
-            # resume so the file a human just edited is the one that runs.
-            app.update_state(thread, {"cfg": project.cfg})
+            # resume (project-mode overlay preserved — see _resume_cfg).
+            app.update_state(thread, {"cfg": _resume_cfg(project)})
 
         try:
             livelog.acquire_run_lock(str(project.dir), chosen.id, cmd=sys.argv)
@@ -420,6 +431,25 @@ def _cmd_run(args) -> int:
 
 
 HUMAN_ACTION_NEEDED = 10  # run-project stopped at a human gate — not an error
+
+
+def _resume_cfg(project) -> dict:
+    """
+    cfg for resuming an existing thread: run.json as edited on disk, plus —
+    when the project runs in plan mode — the same overlay run-project's
+    _drive_slice applies (gate policy, merge-on-approval, remaining budget),
+    so a resume through `run` or `approve` behaves identically to one
+    through run-project.
+    """
+    from . import planner as planmod
+    if not planmod.plan_is_approved(planmod.load_plan(project)):
+        return project.cfg
+    project_budget = float(project.cfg.get("project_budget_usd", 100.0))
+    return {**project.cfg,
+            "gates": _project_gate_policy(project, None),
+            "merge_on_approval": True,
+            "fresh_clone": False,
+            "budget_usd": round(max(project_budget - project.spent_usd(), 0.0), 2)}
 
 
 def _parse_gates(spec: str | None) -> dict | None:
