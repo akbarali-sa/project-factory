@@ -348,6 +348,14 @@ def launch_stack(repo: str, stack: Stack) -> str:
            "NEXT_PUBLIC_API_URL": stack.api_url}
 
     stop_stack()
+    # stop_stack() only knows THIS process's children. A previous driver
+    # process (a resumed run, a crashed one, a dashboard relaunch) leaves
+    # servers holding these ports, and its `_processes` dict died with it.
+    # Without this sweep the new spawn loses the port bind, while _wait_http
+    # happily succeeds against the OLD server — so the run tests code from
+    # before the current slice existed and every failure looks like a product
+    # bug. Ownership-checked, exactly like ensure_stack.
+    _free_project_ports(repo, stack)
     _processes["api"] = _spawn_app("api", ["pnpm", "--filter=@repo/api", "dev"],
                                    repo, env)
     if not _wait_http(f"{stack.api_url}/health") and not _wait_http(stack.api_url):
@@ -365,6 +373,29 @@ def _pids_listening(port: int) -> list[int]:
     p = subprocess.run(["lsof", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
                        capture_output=True, text=True)
     return [int(x) for x in p.stdout.split()]
+
+
+def _free_project_ports(repo: str, stack: Stack) -> list[int]:
+    """
+    Kill listeners on this stack's ports that verifiably belong to this
+    project's repo. A foreign squatter is a loud error, never a casualty —
+    same rule as ensure_stack. Returns the pids killed.
+    """
+    killed: list[int] = []
+    for port in (stack.api_port, stack.web_port):
+        for pid in _pids_listening(port):
+            if not _owned_by_repo(pid, repo):
+                raise RuntimeError(
+                    f"port {port} is held by a process not from this project "
+                    f"(pid {pid}) — refusing to kill it. Free the port and re-run.")
+            try:
+                os.kill(pid, 9)
+                killed.append(pid)
+            except ProcessLookupError:
+                pass
+    if killed:
+        time.sleep(2)   # let the kernel release the bind before we re-bind
+    return killed
 
 
 def _owned_by_repo(pid: int, repo: str) -> bool:
@@ -394,18 +425,8 @@ def ensure_stack(repo: str, stack: Stack) -> str | None:
     if _wait_http(f"{stack.api_url}/health", attempts=1, delay=0) and \
             _wait_http(stack.web_url, attempts=3, delay=2):
         return None
-    for port in (stack.api_port, stack.web_port):
-        for pid in _pids_listening(port):
-            if _owned_by_repo(pid, repo):
-                try:
-                    os.kill(pid, 9)
-                except ProcessLookupError:
-                    pass
-            else:
-                raise RuntimeError(
-                    f"port {port} is held by a process not from this project "
-                    f"(pid {pid}) — refusing to kill it. Free the port and re-run.")
-    time.sleep(2)
+    # launch_stack frees the ports itself (_free_project_ports) — one
+    # implementation of "whose port is this", used by both paths.
     return launch_stack(repo, stack)
 
 
