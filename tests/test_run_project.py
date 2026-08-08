@@ -244,6 +244,40 @@ class LiveLogCostTests(unittest.TestCase):
             self.assertEqual(livelog.live_log_cost(td, "nope"), 0.0)
 
 
+class SpliceSchemaTests(unittest.TestCase):
+    """The lint must validate what migrate() will write: a contract may
+    reference models it does not redeclare (slice 2's User references the
+    untouched PackingList and UserRole) — validating its block alone
+    false-positived on exactly that."""
+
+    EXISTING = (
+        'generator client { provider = "prisma-client-js" }\n\n'
+        "enum UserRole {\n  ADMIN\n  OPERATOR\n}\n\n"
+        "model User {\n  id String @id\n  role UserRole\n}\n\n"
+        "model PackingList {\n  id String @id\n}\n"
+    )
+
+    def test_redeclared_model_replaces_existing(self) -> None:
+        from project_factory.harness import splice_schema
+        out = splice_schema(self.EXISTING,
+                            "model User {\n  id String @id\n  role UserRole\n"
+                            "  scans Scan[]\n}\n\nmodel Scan {\n  id String @id\n}")
+        self.assertEqual(out.count("model User {"), 1)
+        self.assertIn("scans Scan[]", out)
+        self.assertIn("model Scan {", out)
+        # untouched declarations survive
+        self.assertIn("model PackingList {", out)
+        self.assertIn("enum UserRole {", out)
+        self.assertIn("generator client", out)
+
+    def test_new_models_append_without_disturbing_rest(self) -> None:
+        from project_factory.harness import splice_schema
+        out = splice_schema(self.EXISTING, "model CountEntry {\n  id String @id\n}")
+        self.assertEqual(out.count("model User {"), 1)
+        self.assertTrue(out.rstrip().endswith("}"))
+        self.assertIn("model CountEntry {", out)
+
+
 class RerunIdempotencyTests(unittest.TestCase):
     """A reused repo (new thread generation / crashed-slice retry) re-runs
     commit_specs and create_branch — both must tolerate already-done work."""

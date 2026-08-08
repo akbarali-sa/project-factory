@@ -189,6 +189,32 @@ def check_traceability(repo: str, scenarios: dict) -> Result:
 # -----------------------------------------------------------------------------
 # 4. Contract validation — the payoff of a tight repo structure
 # -----------------------------------------------------------------------------
+def splice_schema(existing: str, new_models: str) -> str:
+    """
+    Fold a contract's prisma block into an existing schema: a model/enum the
+    contract REDECLARES replaces the existing block wholesale (redeclare-to-
+    modify), a new one is appended, and everything the contract doesn't
+    mention survives untouched. Single source of truth for both migrate()
+    (which writes the result) and check_contract (which validates it) — a
+    contract may legitimately reference models it does not redeclare, so
+    validating its block in isolation false-positives on every later slice.
+    """
+    for block in re.split(r"\n(?=model |enum )", new_models.strip()):
+        block = block.strip()
+        name = re.match(r"(?:model|enum)\s+(\w+)", block)
+        if not name:
+            continue
+        existing_block = re.search(
+            rf"^(?:model|enum)\s+{name.group(1)}\b[^\n]*\{{.*?\n\}}\n?",
+            existing, re.M | re.S)
+        if existing_block:
+            existing = (existing[:existing_block.start()] + block + "\n"
+                        + existing[existing_block.end():])
+        else:
+            existing = existing.rstrip() + "\n\n" + block + "\n"
+    return existing
+
+
 def check_contract(contract: str, scenarios: dict, repo: str) -> Result:
     errors: list[str] = []
 
@@ -201,20 +227,20 @@ def check_contract(contract: str, scenarios: dict, repo: str) -> Result:
     if errors:
         return Result(False, errors=errors)
 
-    # 4a. prisma validate on a temp schema
+    # 4a. prisma validate on the SPLICED schema — the same document migrate()
+    # will write. Validating the contract's block alone false-positives from
+    # the second slice on: a contract legitimately references models/enums it
+    # does not redeclare (they already live in the repo's schema).
     with tempfile.TemporaryDirectory() as td:
         base = pathlib.Path(repo) / "apps/api/prisma/schema.prisma"
-        header = ""
         if base.exists():
-            # generator/datasource have no nested braces, so a non-greedy
-            # match is safe and — unlike a line-prefix filter — never
-            # mistakes an indented field in some *other* model for part of
-            # these two blocks.
-            blocks = re.findall(r"(?:generator|datasource)\s+\w+\s*\{[^}]*\}",
-                                base.read_text())
-            header = "\n\n".join(blocks)
+            merged = splice_schema(base.read_text(), prisma.group(1))
+        else:
+            # No repo schema yet (unit tests, dry validation): fall back to
+            # the contract block alone, which then must be self-contained.
+            merged = prisma.group(1)
         tmp = pathlib.Path(td) / "schema.prisma"
-        tmp.write_text(header + "\n" + prisma.group(1))
+        tmp.write_text(merged)
 
         # The temp schema lives outside the repo, so Prisma's own .env
         # discovery (relative to the schema path / cwd) won't find the

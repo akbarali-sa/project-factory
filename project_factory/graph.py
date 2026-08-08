@@ -41,6 +41,7 @@ from .harness import (
     check_traceability,
     check_write_scope,
     run_tests,
+    splice_schema,
 )
 from .models import BudgetExceeded, Usage, claude
 from .prompting import render_scenarios
@@ -359,22 +360,8 @@ def migrate(state: S) -> dict:
     m = re.search(r"```prisma\n(.*?)```", state["contract"], re.S)
     schema = pathlib.Path(state["repo_path"]) / "apps/api/prisma/schema.prisma"
     if m:
-        existing = schema.read_text()
-        new_models = m.group(1).strip()
-        for block in re.split(r"\n(?=model |enum )", new_models):
-            block = block.strip()
-            name = re.match(r"(?:model|enum)\s+(\w+)", block)
-            if not name:
-                continue
-            existing_block = re.search(
-                rf"^(?:model|enum)\s+{name.group(1)}\b[^\n]*\{{.*?\n\}}\n?",
-                existing, re.M | re.S)
-            if existing_block:
-                existing = (existing[:existing_block.start()] + block + "\n"
-                            + existing[existing_block.end():])
-            else:
-                existing = existing.rstrip() + "\n\n" + block + "\n"
-        schema.write_text(existing)
+        # Same splice check_contract validated — see harness.splice_schema.
+        schema.write_text(splice_schema(schema.read_text(), m.group(1)))
 
     lp = _log_path(state)
     infra.migrate(state["repo_path"], state["stack"], state["cfg"].get("db_reset_consent"), log_path=lp)
