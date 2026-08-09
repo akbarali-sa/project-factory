@@ -262,12 +262,24 @@ def check_contract(contract: str, scenarios: dict, repo: str) -> Result:
         if p.returncode != 0:
             errors.append(f"prisma validate failed: {(p.stdout + p.stderr)[-800:]}")
 
-    # 4b. every aggregate has a model — in the spliced schema, so an aggregate
-    # a later slice merely READS (wave 1's PackingList/PackingListItem, say)
-    # counts as satisfied without forcing a pointless redeclaration.
+    # 4b. every aggregate is ACCOUNTED FOR by the contract — as a persisted
+    # model in the spliced schema (so one a later slice merely READS counts,
+    # without forcing a pointless redeclaration), or as a read-model surfaced
+    # through the API. A projection like WorkerProductivity is computed from
+    # other tables on request; demanding a table for it would be demanding a
+    # denormalised cache nobody asked for. What must never pass is an
+    # aggregate the contract simply forgot.
     for agg in scenarios["aggregates"]:
-        if not re.search(rf"model\s+{agg}\b", merged):
-            errors.append(f"aggregate '{agg}' has no Prisma model")
+        in_schema = re.search(rf"model\s+{agg}\b", merged)
+        # Substring, deliberately: a read-model surfaces under names built
+        # AROUND the aggregate's ("calculateWorkerProductivity",
+        # "WorkerProductivityResponse"), so a word-boundary match would reject
+        # exactly the contracts this clause exists to accept.
+        in_api = agg in openapi.group(1)
+        if not in_schema and not in_api:
+            errors.append(
+                f"aggregate '{agg}' is in neither the Prisma schema nor the "
+                "OpenAPI contract")
 
     # 4c. scenarios imply status codes -> contract must declare them
     declared = set(re.findall(r"['\"]?(\d{3})['\"]?:", openapi.group(1)))

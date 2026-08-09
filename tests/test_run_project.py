@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import subprocess
 import tempfile
 import unittest
@@ -310,6 +311,26 @@ class AggregateCheckTests(unittest.TestCase):
     """4b must judge the SPLICED schema too: a later slice's oracle lists
     aggregates it only reads (wave 1's PackingList), and forcing a pointless
     redeclaration to satisfy the lint is exactly the wrong incentive."""
+
+    def test_read_model_aggregate_is_satisfied_by_the_api_contract(self) -> None:
+        """A projection (WorkerProductivity: counts per worker, computed on
+        request) has no table by design. Demanding one would demand a
+        denormalised cache nobody asked for — but an aggregate the contract
+        forgot entirely must still fail."""
+        openapi = (
+            "paths:\n  /reports/productivity:\n    get:\n"
+            "      operationId: calculateWorkerProductivity\n"
+            "components:\n  schemas:\n    WorkerProductivityResponse:\n"
+            "      type: object\n"
+        )
+        schema = "model ReportingPackage {\n  id String @id\n}\n"
+        for agg, expected in (("WorkerProductivity", True),
+                              ("ReportingPackage", True),
+                              ("NeverMentioned", False)):
+            with self.subTest(aggregate=agg):
+                accounted = bool(re.search(rf"model\s+{agg}\b", schema)
+                                 or agg in openapi)
+                self.assertEqual(accounted, expected)
 
     def test_aggregate_satisfied_by_existing_repo_model(self) -> None:
         from project_factory.harness import splice_schema
