@@ -257,8 +257,31 @@ class Project:
         self._write_state()
 
     def spent_usd(self) -> float:
-        """Recorded project spend across completed/attempted slices."""
-        return round(sum(self.state.get("slice_costs", {}).values()), 2)
+        """
+        Project spend, read from the LIVE LOGS rather than the ledger.
+
+        The ledger is only written when a slice exits, so mid-slice — exactly
+        when you ask "how much has this cost so far" — it reports the last
+        completed slice and nothing since. During the barcode run it said
+        $114 while the logs said $146, and that stale figure was quoted as
+        fact for hours. The logs are append-only and updated per agent call,
+        so they answer the question at any moment; the ledger stays as the
+        durable record and wins where it is higher (a log can be lost, and a
+        recorded cost must never shrink).
+        """
+        from . import livelog
+
+        ledger = self.state.get("slice_costs", {})
+        live_dir = self.dir / ".factory" / "live"
+        ids = set(ledger)
+        if live_dir.is_dir():
+            ids |= {p.name.split(".log")[0] for p in live_dir.glob("*.log*")}
+        total = sum(
+            max(float(ledger.get(sid, 0.0)),
+                livelog.live_log_cost(str(self.dir), sid))
+            for sid in ids
+        )
+        return round(total, 2)
 
     def _write_state(self) -> None:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)

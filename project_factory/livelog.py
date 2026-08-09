@@ -43,30 +43,58 @@ def _day_marker_path(log_path: pathlib.Path) -> pathlib.Path:
 _AGENT_COST = re.compile(r"✓ \w+ done in \d+s \(\$(\d+\.\d+)\)")
 
 
-def live_log_cost(project_dir: str, slice_id: str) -> float:
+def live_log_cost(project_dir: str, slice_id: str,
+                  include_archived: bool = True) -> float:
     """
     Ground-truth spend for a slice: the sum of every completed agent's
     '✓ <agent> done in Ns ($X.XXX)' line in the live log. The checkpointed
     Usage counter loses any node that raises AFTER its agent call completed
     (the state update never commits), so it is a floor — this is the total.
     """
-    p = pathlib.Path(project_dir) / ".factory" / "live" / f"{slice_id}.log"
-    if not p.exists():
-        return 0.0
-    return round(sum(float(m.group(1))
-                     for m in _AGENT_COST.finditer(p.read_text())), 2)
+    live = pathlib.Path(project_dir) / ".factory" / "live"
+    current = live / f"{slice_id}.log"
+    # include_archived: every generation of this slice, because the project
+    # ledger asks "what has this slice cost me", not "what did the latest
+    # attempt cost".
+    paths = [current] if not include_archived else \
+        [current, *sorted(live.glob(f"{slice_id}.log.[0-9]*"))]
+    total = 0.0
+    for p in paths:
+        if p.exists():
+            total += sum(float(m.group(1)) for m in _AGENT_COST.finditer(p.read_text()))
+    return round(total, 2)
 
 
 def reset(project_dir: str, slice_id: str) -> None:
-    """Truncate at the start of a genuinely fresh run so a new run doesn't
-    inherit a previous attempt's tail. Never called on resume (ingest only
-    runs once per thread — LangGraph skips it when resuming from a
-    checkpoint), so a resumed run keeps its history — including across
+    """Start a fresh run's log without destroying the previous one.
+
+    The old log is ARCHIVED, not truncated. Thread generations exist so a
+    slice can be re-run and the two runs compared — and truncating on the new
+    generation deleted exactly the evidence needed to compare them. It also
+    destroyed the cost record: live_log_cost() is the ground truth the project
+    ledger trusts, so slice 1 of the barcode project reported $0.00 after its
+    g2 rerun even though it had cost $48.12.
+
+    Never called on resume (ingest runs once per thread — LangGraph skips it
+    when resuming), so a resumed run keeps its history, including across
     however many days a paused-at-a-gate slice takes to finish; see
-    `_ensure_day_banner` for how that stays legible."""
+    `_ensure_day_banner` for how that stays legible.
+    """
     p = path_for(project_dir, slice_id)
+    if p.exists() and p.stat().st_size > 0:
+        archive = _next_archive_path(p)
+        p.replace(archive)
     p.write_text("")
     _day_marker_path(p).unlink(missing_ok=True)
+
+
+def _next_archive_path(log_path: pathlib.Path) -> pathlib.Path:
+    """<slice>.log -> <slice>.log.1, .2, … — oldest run keeps the lowest
+    number, so the sequence reads chronologically."""
+    n = 1
+    while (candidate := log_path.with_suffix(log_path.suffix + f".{n}")).exists():
+        n += 1
+    return candidate
 
 
 def _ensure_day_banner(log_path: pathlib.Path) -> None:

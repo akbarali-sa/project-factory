@@ -367,6 +367,51 @@ class AggregateCheckTests(unittest.TestCase):
                 self.assertRegex(merged, rf"model\s+{agg}\b")
 
 
+class LiveLogAccountingTests(unittest.TestCase):
+    """Two accounting bugs from the barcode run: a rerun truncated the log that
+    held slice 1's $48.12 (reporting $0.00), and the ledger only updated at
+    slice exit, so mid-run it reported $114 while the logs said $146 — and the
+    stale figure was quoted as fact for hours."""
+
+    LINE = "[10:00:00] ✓ implementer done in 100s ($12.34)\n"
+
+    def test_reset_archives_instead_of_truncating(self) -> None:
+        from project_factory import livelog
+        with tempfile.TemporaryDirectory() as td:
+            log = livelog.path_for(td, "s1")
+            log.write_text(self.LINE)
+            livelog.reset(td, "s1")                     # a new generation starts
+            self.assertEqual(log.read_text(), "")
+            self.assertTrue((log.parent / "s1.log.1").exists())
+
+    def test_cost_spans_generations(self) -> None:
+        from project_factory import livelog
+        with tempfile.TemporaryDirectory() as td:
+            log = livelog.path_for(td, "s1")
+            log.write_text(self.LINE)
+            livelog.reset(td, "s1")
+            log.write_text(self.LINE)                   # g2 costs the same again
+            self.assertEqual(livelog.live_log_cost(td, "s1"), 24.68)
+            self.assertEqual(
+                livelog.live_log_cost(td, "s1", include_archived=False), 12.34)
+
+    def test_spent_usd_prefers_the_higher_of_ledger_and_logs(self) -> None:
+        from project_factory import livelog
+        with tempfile.TemporaryDirectory() as td:
+            board = {"id": "b", "name": "B", "business_events": [], "flows": []}
+            pdir = pathlib.Path(td) / "proj"
+            (pdir / "specs").mkdir(parents=True)
+            (pdir / "specs" / "b.board.json").write_text(json.dumps(board))
+            (pdir / "specs" / "project-plan.json").write_text(
+                json.dumps({"slices": [], "out_of_scope": [], "approved_by": None}))
+            livelog.path_for(str(pdir), "s1").write_text(self.LINE)   # $12.34 live
+            project = cfgmod.discover("proj", workspace=td)
+            project.record_slice_cost("s1", 5.0)        # ledger lags behind
+            self.assertEqual(project.spent_usd(), 12.34)
+            project.record_slice_cost("s1", 20.0)       # ledger ahead (log lost)
+            self.assertEqual(project.spent_usd(), 20.0)
+
+
 class DigestFailuresTests(unittest.TestCase):
     """Four browser projects report one root cause four times. The digest keeps
     every DISTINCT failure and drops the repetition — that repetition is what
