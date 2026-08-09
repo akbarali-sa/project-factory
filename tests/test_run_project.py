@@ -18,7 +18,7 @@ import tempfile
 import unittest
 
 from project_factory import config as cfgmod
-from project_factory import livelog, planner, repo
+from project_factory import harness, livelog, planner, repo
 from project_factory.graph import _gate_policy, gate_contract, gate_spec
 
 
@@ -618,6 +618,45 @@ class MergeToMainTests(unittest.TestCase):
             self.assertEqual(git("rev-parse", "HEAD").strip(), sha)
             # --no-ff: the merge commit has two parents
             self.assertEqual(len(git("show", "-s", "--format=%P", "HEAD").split()), 2)
+
+
+class PromptPortabilityTests(unittest.TestCase):
+    """
+    The factory is generic; only the IR and run.json carry a domain. README and
+    the build plan both describe check_prompt_leak() as a CI gate — but this
+    repo has no CI, so for its whole life the guard was wired to nothing. It
+    caught three real leaks the moment it was finally run, all introduced the
+    same day by someone (me) writing a worked example straight from the last
+    project into a prompt.
+
+    Running it here is the cheapest place that actually executes.
+    """
+
+    def test_no_domain_nouns_in_prompts(self) -> None:
+        r = harness.check_prompt_leak("project_factory")
+        self.assertTrue(r.ok, "domain vocabulary leaked into factory code:\n  "
+                              + "\n  ".join(r.errors))
+
+    def test_the_guard_can_still_fail(self) -> None:
+        """A guard that cannot fail is decoration. Point it at a fixture that
+        does leak and confirm it says so — otherwise a refactor that quietly
+        breaks the scan would look like a permanent pass."""
+        with tempfile.TemporaryDirectory() as td:
+            pathlib.Path(td, "leaky.py").write_text(
+                'PROMPT = "every warehouse has a packing list"\n')
+            r = harness.check_prompt_leak(td)
+            self.assertFalse(r.ok)
+            self.assertTrue(any("leaky.py" in e for e in r.errors), r.errors)
+
+    def test_comments_are_not_leaks(self) -> None:
+        """Comments never reach a model, and excluding them is what keeps the
+        check precise enough to be trusted — 'container' is a domain noun AND
+        a Docker term."""
+        with tempfile.TemporaryDirectory() as td:
+            pathlib.Path(td, "commented.py").write_text(
+                '# the barcode project proved this: a warehouse has "packing lists"\n'
+                'X = 1\n')
+            self.assertTrue(harness.check_prompt_leak(td).ok)
 
 
 class RateLimitDetection(unittest.TestCase):

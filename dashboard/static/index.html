@@ -44,7 +44,7 @@
       <div class="card hidden control-form" id="new-project-card" style="margin-bottom:16px;">
         <h2>New project</h2>
         <label class="form-label">Project slug (folder name in the workspace)</label>
-        <input id="np-slug" placeholder="e.g. barcode-mvp" />
+        <input id="np-slug" placeholder="e.g. acme-crm" />
         <label class="form-label">Board file (a *.board.json from EventStorming)</label>
         <div class="control-row" style="margin-bottom:4px;">
           <button class="btn" id="np-board-pick">📂 Choose file…</button>
@@ -53,7 +53,7 @@
           <input type="file" id="np-board-file" accept=".json,application/json" class="hidden" />
         </div>
         <label class="form-label">…or type a path on this machine</label>
-        <input id="np-board-path" placeholder="e.g. ~/Downloads/barcode-sorting-inventory-mvp.board.json" />
+        <input id="np-board-path" placeholder="e.g. ~/Downloads/acme-crm.board.json" />
         <label class="form-label">…or paste the board JSON directly</label>
         <textarea id="np-board-json" placeholder='{"name": "...", "business_events": [...]}' style="min-height:80px;"></textarea>
 
@@ -78,7 +78,7 @@
 
         <div id="np-fallback-slice">
           <label class="form-label">First slice name (used only when the board yields no slices)</label>
-          <input id="np-slice-name" placeholder="e.g. container-packing-list" />
+          <input id="np-slice-name" placeholder="e.g. customer-onboarding" />
         </div>
 
         <label class="slice-candidate" style="margin-top:10px;">

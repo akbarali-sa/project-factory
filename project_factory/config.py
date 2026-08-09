@@ -9,7 +9,7 @@ THE LAYOUT (workspace lives OUTSIDE the factory, deliberately)
     │   ├── docker/                 optional app-stack compose (not the DB)
     │   └── defaults.json           true for EVERY project — incl. shared postgres
     └── projects/                   sibling; never inside the factory
-        └── barcode-mvp/
+        └── acme-crm/
             ├── run.json            per-project OVERRIDES only
             ├── specs/
             │   ├── *.board.json    presales IR

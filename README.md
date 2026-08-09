@@ -41,14 +41,14 @@ python -m project_factory doctor
 ## First slice
 
 ```bash
-python -m project_factory new barcode-mvp \
-    --board ~/Downloads/barcode-sorting-inventory-mvp.board.json \
-    --slice-name container-packing-list
+python -m project_factory new acme-crm \
+    --board ~/Downloads/acme-crm.board.json \
+    --slice-name customer-onboarding
 
 # author the scenarios — THE ORACLE. Highest-value work in the pipeline.
-$EDITOR ../projects/barcode-mvp/specs/container-packing-list.scenarios.yaml
+$EDITOR ../projects/acme-crm/specs/customer-onboarding.scenarios.yaml
 
-python -m project_factory run barcode-mvp --dry-run
+python -m project_factory run acme-crm --dry-run
 ```
 
 ### Cheap-first ladder — don't run the whole graph on attempt one
@@ -71,9 +71,9 @@ Runs pause at Gate A/B/C. State is in Postgres, so a pause can last hours or
 survive a reboot.
 
 ```bash
-python -m project_factory status  barcode-mvp     # where is it paused, and why
-python -m project_factory approve barcode-mvp
-python -m project_factory approve barcode-mvp --reject --note "SC-003 unclear"
+python -m project_factory status  acme-crm     # where is it paused, and why
+python -m project_factory approve acme-crm
+python -m project_factory approve acme-crm --reject --note "SC-003 unclear"
 ```
 
 `thread_id` is derived as `<slug>:<slice_id>`, so `run` on an interrupted slice
@@ -93,7 +93,7 @@ impossible to commit client code into this repo.
 │   ├── defaults.json           true for EVERY project — incl. shared postgres
 │   └── .cache/starter.git      bare mirror of the starter (gitignored)
 └── projects/                   sibling
-    └── barcode-mvp/
+    └── acme-crm/
         ├── run.json            overrides only → { "budget_usd": 25 }
         ├── specs/              *.board.json + *.scenarios.yaml
         ├── .factory/state.json completed slices

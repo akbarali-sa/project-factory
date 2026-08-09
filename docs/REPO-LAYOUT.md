@@ -34,10 +34,10 @@ One **blocking gap** the branch surfaced: the `User` model is `id, email, name, 
 │   └── .cache/starter.git            bare mirror of your fork   (gitignored)
 │
 └── projects/                         SIBLING — never inside the factory
-    └── barcode-mvp/
+    └── acme-crm/
         ├── run.json                  overrides only  →  { "budget_usd": 25 }
         ├── specs/
-        │   ├── barcode.board.json         presales IR
+        │   ├── acme-crm.board.json         presales IR
         │   └── *.scenarios.yaml           one file per slice
         ├── .factory/state.json       completed slices (factory-written)
         └── repo/                     GENERATED: git init, no starter history
@@ -177,20 +177,20 @@ claude setup-token
 # 2. toolchain + env check (Node >= 24, pnpm 11.x, docker, claude, no API key)
 python -m project_factory doctor
 
-# 3. scaffold — creates ../projects/barcode-mvp/{run.json,specs/}
-python -m project_factory new barcode-mvp \
-    --board ~/Downloads/barcode-sorting-inventory-mvp.board.json \
-    --slice-name container-packing-list
+# 3. scaffold — creates ../projects/acme-crm/{run.json,specs/}
+python -m project_factory new acme-crm \
+    --board ~/Downloads/acme-crm.board.json \
+    --slice-name customer-onboarding
 
 # 4. author the scenarios — THE ORACLE, the highest-value work in the pipeline
-$EDITOR ../projects/barcode-mvp/specs/container-packing-list.scenarios.yaml
+$EDITOR ../projects/acme-crm/specs/customer-onboarding.scenarios.yaml
 
 # 5. free checks before spending a token
 python -m project_factory.harness                    # prompt-leak -> must be 0
-python -m project_factory run barcode-mvp --dry-run  # resolve + print, no spend
+python -m project_factory run acme-crm --dry-run  # resolve + print, no spend
 
 # 6. run (next unstarted slice; repeat to walk the waves)
-python -m project_factory run barcode-mvp
+python -m project_factory run acme-crm
 ```
 
 ### Five steps, not one big bang

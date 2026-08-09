@@ -3,16 +3,16 @@ CLI — invoke by project NAME, not by paths.
 
     python -m project_factory doctor
     python -m project_factory list
-    python -m project_factory new barcode-mvp --board ~/Downloads/x.board.json
+    python -m project_factory new acme-crm --board ~/Downloads/x.board.json
 
-    python -m project_factory run barcode-mvp --dry-run     resolve + print, no spend
-    python -m project_factory run barcode-mvp --until baseline    cheap-first ladder
-    python -m project_factory run barcode-mvp               next unstarted slice
-    python -m project_factory run barcode-mvp --slice orders
+    python -m project_factory run acme-crm --dry-run     resolve + print, no spend
+    python -m project_factory run acme-crm --until baseline    cheap-first ladder
+    python -m project_factory run acme-crm               next unstarted slice
+    python -m project_factory run acme-crm --slice orders
 
-    python -m project_factory status barcode-mvp            where is it paused?
-    python -m project_factory approve barcode-mvp           pass the pending gate
-    python -m project_factory approve barcode-mvp --reject --note "fix SC-003"
+    python -m project_factory status acme-crm            where is it paused?
+    python -m project_factory approve acme-crm           pass the pending gate
+    python -m project_factory approve acme-crm --reject --note "fix SC-003"
 
 Board path, scenario files, repo location and thread id are all discovered from
 the project directory layout — see config.py.
