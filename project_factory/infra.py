@@ -504,6 +504,42 @@ def ensure_stack(repo: str, stack: Stack) -> str | None:
     return launch_stack(repo, stack)
 
 
+def assert_web_serves_app(stack: Stack) -> None:
+    """
+    Confirm the web URL is answered by the WEB APP, not by something else.
+
+    A health check proves only that someone is listening. Twice in one project
+    that someone was the API — once because api and web were handed the same
+    port, once because a previous driver's server still held it — and the whole
+    e2e suite then ran against a REST server, failing every test at the login
+    page. Three slices spent their entire diagnose budgets on it, roughly eight
+    hours, because "every test failed" reads like a product collapse.
+
+    One HTTP request turns that into a sentence.
+    """
+    try:
+        with urllib.request.urlopen(stack.web_url, timeout=15) as response:
+            content_type = (response.headers.get("Content-Type") or "").lower()
+            body = response.read(2048).decode("utf-8", "replace")
+    except Exception as e:  # noqa: BLE001 — any failure here is the same verdict
+        raise RuntimeError(
+            f"web URL {stack.web_url} did not answer ({e}). The stack is not "
+            "serving the app under test — fix that before reading any test "
+            "failure."
+        ) from e
+
+    if "text/html" in content_type or "<html" in body.lower():
+        return
+    raise RuntimeError(
+        f"{stack.web_url} is answering, but not with HTML "
+        f"(content-type: {content_type or 'none'}). Something other than the "
+        f"web app owns that port — most likely the API. First 200 bytes:\n"
+        f"{body[:200]}\n"
+        "Every e2e test would fail at the login page and look like a product "
+        "bug. Free the port and relaunch instead."
+    )
+
+
 def tail(which: str, lines: int = 80) -> str:
     log = _process_logs.get(which)
     if not log or not log.exists():

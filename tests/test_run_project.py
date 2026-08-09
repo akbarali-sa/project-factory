@@ -367,6 +367,98 @@ class AggregateCheckTests(unittest.TestCase):
                 self.assertRegex(merged, rf"model\s+{agg}\b")
 
 
+class DigestFailuresTests(unittest.TestCase):
+    """Four browser projects report one root cause four times. The digest keeps
+    every DISTINCT failure and drops the repetition — that repetition is what
+    the diagnostician was being charged to read."""
+
+    RAW = """
+[1/24] [chromium] › upload.test.ts:10:1 › WEB-001: passing test should not appear
+  2 failed
+    [chromium] › scan.test.ts:5:1 › WEB-002: unmatched barcode
+    [webkit] › scan.test.ts:5:1 › WEB-002: unmatched barcode
+  1) [chromium] › scan.test.ts:5:1 › WEB-002: unmatched barcode
+    Error: expect(locator).toBeVisible() failed
+    Locator: getByText('Cotton Crew Tee')
+    Timeout: 5000ms
+  2) [webkit] › scan.test.ts:5:1 › WEB-002: unmatched barcode
+    Error: expect(locator).toBeVisible() failed
+    Locator: getByText('Cotton Crew Tee')
+    Timeout: 5000ms
+  30 passed (2.0m)
+"""
+
+    def test_collapses_the_same_error_across_browsers(self) -> None:
+        from project_factory.harness import digest_failures
+        digest = digest_failures(self.RAW)
+        self.assertIn("[x2]", digest)                     # both browsers collapsed
+        self.assertEqual(digest.count("Cotton Crew Tee"), 1)
+        self.assertIn("30 passed", digest)                 # summary retained
+
+    def test_excludes_passing_progress_lines(self) -> None:
+        from project_factory.harness import digest_failures
+        digest = digest_failures(self.RAW)
+        self.assertNotIn("should not appear", digest)
+
+    def test_unrecognised_output_falls_back_to_a_tail(self) -> None:
+        """An unfamiliar reporter must degrade to today's behaviour, never to
+        an empty prompt."""
+        from project_factory.harness import digest_failures
+        raw = "something completely different\n" * 50
+        self.assertIn("something completely different", digest_failures(raw))
+
+
+class InfraContractTests(unittest.TestCase):
+    """The regression this exists for: slice 3's implementer added
+    `--port 3000` to the web dev script, pinning the app to a port the factory
+    had not allocated. The health check then passed against whatever else was
+    listening, and two slices burned their diagnose budgets — roughly eight
+    hours — testing web pages against a REST API."""
+
+    def _repo(self, td: str):
+        def git(*args: str) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                ["git", "-C", td, "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                capture_output=True, text=True, check=True)
+        git("init", "-b", "main")
+        (pathlib.Path(td) / "apps" / "web").mkdir(parents=True)
+        (pathlib.Path(td) / "apps" / "web" / "package.json").write_text(
+            '{\n  "scripts": {\n    "dev": "next dev"\n  }\n}\n')
+        (pathlib.Path(td) / "apps" / "web" / "vitest.config.ts").write_text("export default {}\n")
+        git("add", "-A"); git("commit", "-m", "base")
+        return git
+
+    def test_pinning_the_dev_port_is_a_violation(self) -> None:
+        from project_factory.harness import check_infra_contract
+        with tempfile.TemporaryDirectory() as td:
+            self._repo(td)
+            pkg = pathlib.Path(td) / "apps" / "web" / "package.json"
+            pkg.write_text(pkg.read_text().replace('"next dev"', '"next dev --port 3000"'))
+            result = check_infra_contract(td)
+            self.assertFalse(result.ok)
+            self.assertTrue(any("--port 3000" in e for e in result.errors), result.errors)
+
+    def test_other_config_edits_are_reported_not_blocked(self) -> None:
+        """Serialising vitest for a shared test database was a GOOD agent edit.
+        Blocking it would cost more than it saves — it is surfaced instead."""
+        from project_factory.harness import check_infra_contract
+        with tempfile.TemporaryDirectory() as td:
+            self._repo(td)
+            cfg = pathlib.Path(td) / "apps" / "web" / "vitest.config.ts"
+            cfg.write_text("export default { test: { fileParallelism: false } }\n")
+            result = check_infra_contract(td)
+            self.assertTrue(result.ok, result.errors)
+            self.assertIn("apps/web/vitest.config.ts", result.data["notable"])
+
+    def test_untouched_repo_is_clean(self) -> None:
+        from project_factory.harness import check_infra_contract
+        with tempfile.TemporaryDirectory() as td:
+            self._repo(td)
+            result = check_infra_contract(td)
+            self.assertTrue(result.ok)
+            self.assertEqual(result.data["notable"], [])
+
+
 class RerunIdempotencyTests(unittest.TestCase):
     """A reused repo (new thread generation / crashed-slice retry) re-runs
     commit_specs and create_branch — both must tolerate already-done work."""

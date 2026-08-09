@@ -37,9 +37,11 @@ from . import config, infra, livelog
 from . import repo as repo_mod
 from .harness import (
     check_contract,
+    check_infra_contract,
     check_red_first,
     check_traceability,
     check_write_scope,
+    digest_failures,
     run_tests,
     splice_schema,
 )
@@ -88,6 +90,7 @@ class S(TypedDict, total=False):
     log: Annotated[list[str], lambda a, b: (a or []) + (b or [])]
 
     pr_approved: Annotated[bool, _last]    # Gate C verdict — merge_slice reads it
+    infra_touched: Annotated[list[str], _last]  # infra files an agent edited
 
 
 def _budget(state: S) -> float:
@@ -431,6 +434,11 @@ def _implement(state: S, phase: str, scope: list[str], instruction: str) -> dict
         "The tests are the specification and are READ-ONLY. Never edit, delete "
         "or skip a test. Follow AGENTS.md and the repo skills. Match the "
         "existing reference module's structure.\n\n"
+        "Do NOT change how the app is RUN — the `dev`/`start` scripts, the "
+        "Playwright webServer config, or any .env. The harness allocates ports "
+        "and starts the stack; pinning a port or altering the boot sequence "
+        "breaks it silently and resurfaces as failures that look like product "
+        "bugs. Behaviour changes belong in src/.\n\n"
         f"Frozen contract:\n{state['contract'][:4500]}{fix}",
         cwd=state["repo_path"], attempt=n, write_scope=scope, read_only=READ_ONLY,
         usage=state["usage"], budget_usd=_budget(state), log_path=_log_path(state),
@@ -439,8 +447,17 @@ def _implement(state: S, phase: str, scope: list[str], instruction: str) -> dict
     if not scope_check.ok:
         raise RuntimeError("ORACLE VIOLATION — tests modified:\n"
                            + "\n".join(scope_check.errors))
+    # Caught HERE, not at the gate: a pinned port or an altered boot sequence
+    # makes every later verify fail against the wrong app, and the diagnostician
+    # then reasons about product code that was never the problem.
+    infra = check_infra_contract(state["repo_path"])
+    if not infra.ok:
+        raise RuntimeError("HARNESS CONTRACT VIOLATION:\n" + "\n".join(infra.errors))
+    notable = infra.data.get("notable", [])
     return {"attempts": {phase: n + 1}, "usage": state["usage"],
-            "log": [f"{phase}: attempt {n + 1}"]}
+            "infra_touched": notable,
+            "log": [f"{phase}: attempt {n + 1}"
+                    + (f" (infrastructure files touched: {notable})" if notable else "")]}
 
 
 def implement_api(state: S) -> dict:
@@ -489,6 +506,9 @@ def verify_e2e(state: S) -> dict:
     # Self-heal a stack whose processes died (or wedged) with the run that
     # launched them — the checkpoint remembers launch_stack, the OS doesn't.
     relaunched = infra.ensure_stack(state["repo_path"], state["stack"])
+    # Before spending 20 minutes and a diagnostician on the results, confirm the
+    # thing answering the web URL is actually the web app.
+    infra.assert_web_serves_app(state["stack"])
     r = infra.run_e2e(state["repo_path"], state["stack"],
                       consent=state["cfg"].get("db_reset_consent"),
                       log_path=_log_path(state))
@@ -505,7 +525,12 @@ def _diagnose(state: S, phase: str) -> dict:
         "A generated slice fails its tests. Identify the root cause and give a "
         "specific, minimal fix naming files and changes. Do not restate the "
         "error. Never suggest changing the tests.\n\n"
-        f"Phase: {phase}\n\nFailure output:\n{state['phase_out'].get(phase,'')[-6000:]}\n\n"
+        # A digest, not the raw log: the suite runs every spec across four
+        # browser projects, so one root cause arrives four times verbatim.
+        # Slice 3's diagnostician read 80 copies of a single dead web server
+        # and charged $12.89 to conclude nothing.
+        f"Phase: {phase}\n\nFailures (deduplicated):\n"
+        f"{digest_failures(state['phase_out'].get(phase, ''))[-6000:]}\n\n"
         f"Contract:\n{state['contract'][:2500]}",
         cwd=state["repo_path"], usage=state["usage"], budget_usd=_budget(state), log_path=_log_path(state),
     )
@@ -588,6 +613,10 @@ def gate_pr(state: S) -> dict:
         "attempts": state["attempts"],
         "cost_usd": round(state["usage"].cost_usd, 2),
         "by_agent": {k: round(v, 3) for k, v in state["usage"].by_agent.items()},
+        # Not a failure — but an agent editing build/test config is worth a
+        # human glance before it merges, since it changes how everything after
+        # this slice is built and run.
+        "infrastructure_files_touched": state.get("infra_touched", []),
         "ask": "Review the Draft PR; merge or push fixes.",
     }
     if _gate_policy(state, "pr") == "auto":

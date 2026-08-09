@@ -34,6 +34,9 @@ class Result:
     ok: bool
     summary: str = ""
     errors: list[str] = field(default_factory=list)
+    # Extra findings a check wants to surface at a gate without failing the
+    # run — e.g. infrastructure files an agent touched that a human should see.
+    data: dict = field(default_factory=dict)
 
 
 def _run(cmd: list[str], cwd: str, timeout: int = 900,
@@ -330,6 +333,72 @@ def check_write_scope(repo: str, read_only_globs: list[str]) -> Result:
     )
 
 
+# Files that define the HARNESS's contract with the generated app. An agent
+# editing one of these breaks the pipeline in a way that looks like a product
+# bug, so they are checked separately from the read-only test files above.
+#
+# Evidence for the split: across four generated slices, agents made four
+# infrastructure edits. Three were reasonable (serialising vitest for a shared
+# test database, deploying the schema before tests, hiding the dev indicator).
+# One — adding `--port 3000` to the web `dev` script — pinned the app to a port
+# the factory had not allocated, so `_wait_http` passed against whatever else
+# was listening and TWO slices spent their entire diagnose budgets, roughly
+# eight hours, testing web pages against a REST API. A blanket ban would have
+# blocked the three good edits; silence cost eight hours. So: fail on the few
+# files that decide where and how the app runs, report the rest.
+CONTRACT_FILES = {
+    "dev_script": (re.compile(r"apps/(web|api)/package\.json$"),
+                   re.compile(r'^\+\s*"(dev|start)":')),
+    "web_server": (re.compile(r"playwright\.config\.ts$"),
+                   re.compile(r"^\+.*(webServer|reuseExistingServer|stdout|port)")),
+    "env": (re.compile(r"(^|/)\.env"), re.compile(r"^\+")),
+}
+
+INFRA_FILES = re.compile(
+    r"(package\.json|turbo\.json|.*\.config\.(ts|js|mjs)|Dockerfile|docker-compose.*\.yml)$"
+)
+
+
+def check_infra_contract(repo: str) -> Result:
+    """
+    Did the agent change how the app is RUN, rather than what it does?
+
+    Returns ok=False only for the contract files above — the ones that decide
+    the port the app binds, how Playwright starts it, or what environment it
+    reads. Other infrastructure edits are legitimate often enough that they are
+    reported (for the Gate C payload) rather than blocked.
+    """
+    diff = _run(["git", "diff", "-U0", "HEAD"], repo).stdout
+    touched = [f for f in _run(["git", "diff", "--name-only", "HEAD"], repo)
+               .stdout.splitlines() if f.strip()]
+
+    violations: list[str] = []
+    current_file = ""
+    for line in diff.splitlines():
+        if line.startswith("+++ b/"):
+            current_file = line[6:]
+            continue
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        for name, (path_re, line_re) in CONTRACT_FILES.items():
+            if path_re.search(current_file) and line_re.search(line):
+                violations.append(f"{current_file}: {line.strip()[:110]}  [{name}]")
+
+    notable = [f for f in touched if INFRA_FILES.search(f)]
+    return Result(
+        ok=not violations,
+        summary=(f"{len(notable)} infrastructure file(s) touched"
+                 if notable else "no infrastructure changes"),
+        errors=([
+            "agent changed how the app is RUN, not what it does — this breaks "
+            "the harness silently and surfaces later as product failures:",
+            *violations,
+            "revert these, then re-run; put behaviour changes in src/ instead.",
+        ] if violations else []),
+        data={"notable": notable},
+    )
+
+
 # -----------------------------------------------------------------------------
 # 6. Prompt portability — the guard that makes project #2 possible
 # -----------------------------------------------------------------------------
@@ -401,3 +470,79 @@ if __name__ == "__main__":
     print(r.summary)
     for e in r.errors:
         print(" -", e)
+
+
+# -----------------------------------------------------------------------------
+# Failure digest — what the diagnostician should actually read
+# -----------------------------------------------------------------------------
+_TEST_LINE = re.compile(r"›")
+_ERROR_LINE = re.compile(r"^\s*(Error|AssertionError|TypeError|SyntaxError)[:\s]")
+_COUNT_LINE = re.compile(r"^\s*\d+ (failed|passed|flaky|skipped|did not run)")
+
+
+def digest_failures(output: str, max_errors: int = 12) -> str:
+    """
+    Compress raw test output into the distinct failures.
+
+    The suite runs every spec across four browser projects, so one root cause
+    arrives four times verbatim; slice 3's diagnostician read 80 copies of a
+    single dead web server and charged $12.89 to conclude nothing. Deduplicating
+    by error signature keeps every DISTINCT failure — the signal a root-cause
+    diagnosis needs — and drops the repetition, which is the bulk.
+
+    Falls back to a plain tail when nothing matches, so an unfamiliar reporter
+    format degrades to today's behaviour rather than to an empty prompt.
+    """
+    lines = output.splitlines()
+    counts = [ln.strip() for ln in lines if _COUNT_LINE.match(ln)]
+    failing_tests: list[str] = []
+    errors: dict[str, int] = {}
+
+    in_failure_list = False
+    for i, line in enumerate(lines):
+        # Two reliable markers of a FAILING test, so passing progress lines
+        # (which also contain ›) never leak in: Playwright's numbered detail
+        # headers ("1) [webkit] › …"), and the list printed under the
+        # "N failed"/"N flaky" summary.
+        if _COUNT_LINE.match(line):
+            in_failure_list = bool(re.search(r"(failed|flaky)", line))
+            continue
+        is_detail_header = bool(re.match(r"^\s*\d+\)\s*\[", line))
+        if (is_detail_header or (in_failure_list and _TEST_LINE.search(line))) \
+                and len(failing_tests) < 40:
+            # Drop the numbering and the browser project, so the same test on
+            # chromium and webkit collapses to one entry.
+            name = re.sub(r"^\s*(\d+\)\s*)?\[[^\]]+\]\s*›\s*", "", line.strip())
+            if name and name not in failing_tests:
+                failing_tests.append(name)
+        if _ERROR_LINE.match(line):
+            # Start AT the error and stop before the next test header: a block
+            # that swallows "1) [webkit] › …" differs per browser and would
+            # never collapse — which is the entire point of this function.
+            block_lines = []
+            for ln in lines[i:i + 5]:
+                # Stop at the next test header OR the run summary: either one
+                # is browser/run specific and would stop identical failures
+                # from collapsing.
+                if block_lines and (_TEST_LINE.search(ln) or _COUNT_LINE.match(ln)):
+                    break
+                if ln.strip():
+                    block_lines.append(ln.rstrip())
+            block = "\n".join(block_lines)
+            key = re.sub(r"\b\d+\b", "N", block)[:400]   # ignore line numbers
+            errors[key] = errors.get(key, 0) + 1
+
+    if not errors and not failing_tests:
+        return output[-6000:]
+
+    parts = []
+    if counts:
+        parts.append("SUMMARY: " + " | ".join(counts[-4:]))
+    if failing_tests:
+        parts.append(f"DISTINCT FAILING TESTS ({len(failing_tests)}):\n  - "
+                     + "\n  - ".join(failing_tests[:20]))
+    if errors:
+        ranked = sorted(errors.items(), key=lambda kv: -kv[1])[:max_errors]
+        parts.append("DISTINCT ERRORS (x = how many occurrences collapsed):\n"
+                     + "\n\n".join(f"[x{n}] {block}" for block, n in ranked))
+    return "\n\n".join(parts)
