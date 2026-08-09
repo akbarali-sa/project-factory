@@ -289,7 +289,7 @@ def _cmd_approve(args) -> int:
 
     from langgraph.types import Command
 
-    from .models import BudgetExceeded
+    from .models import BudgetExceeded, RateLimited
 
     cm, app = _open_app(project)
     try:
@@ -354,6 +354,8 @@ def _cmd_approve(args) -> int:
                     slug=args.slug, workspace=args.workspace,
                     dry_run=False, gates=None, max_slices=None))
         return rc
+    except RateLimited as e:
+        return _report_rate_limited(e, args.slug, getattr(chosen, "id", None))
     except BudgetExceeded as e:
         print(f"\nABORTED (budget): {e}", file=sys.stderr)
         return 3
@@ -394,7 +396,7 @@ def _cmd_run(args) -> int:
     print()
     print(infra.preflight())
 
-    from .models import BudgetExceeded
+    from .models import BudgetExceeded, RateLimited
 
     cm, app = _open_app(project, interrupt_after=[args.until] if args.until else None)
     try:
@@ -477,6 +479,8 @@ def _cmd_run(args) -> int:
                 print(f"resume:  python -m project_factory run {args.slug}")
             return 0
         return _report(res, project, chosen)
+    except RateLimited as e:
+        return _report_rate_limited(e, args.slug, getattr(chosen, "id", None))
     except BudgetExceeded as e:
         print(f"\nABORTED (budget): {e}", file=sys.stderr)
         return 3
@@ -485,6 +489,30 @@ def _cmd_run(args) -> int:
 
 
 HUMAN_ACTION_NEEDED = 10  # run-project stopped at a human gate — not an error
+RATE_LIMITED = 11         # account limit, not a defect — resume after it resets
+
+
+def _report_rate_limited(e: Exception, slug: str, slice_id: str | None) -> int:
+    """
+    A rate limit is a PAUSE, and must not read like a crash.
+
+    The crash path tells you to re-run immediately, which against a limit
+    produces the identical failure — and `run-project`, which loops over
+    slices, would keep walking into it. Say plainly that the work is safe in
+    the checkpoint and that the wait is the point. On a subscription seat the
+    binding limit is usually weekly, so check the window before resuming
+    rather than guessing.
+    """
+    resume = (f"python -m project_factory run-project {slug}" if slice_id is None
+              else f"python -m project_factory run-project {slug}  # resumes {slice_id}")
+    print(f"\nPAUSED (account limit) — this is NOT a failure of the generated code."
+          f"\n{e}\n"
+          f"\nEverything completed so far is in the checkpoint; nothing is lost and"
+          f"\nnothing needs re-doing. Only the interrupted node re-runs."
+          f"\n\nCheck your remaining window (`/usage` in an interactive claude"
+          f"\nsession), wait for it to reset, then:\n  {resume}",
+          file=sys.stderr)
+    return RATE_LIMITED
 
 
 def _resume_cfg(project) -> dict:
@@ -535,9 +563,10 @@ def _drive_slice(project, chosen, overlay: dict) -> int:
     """
     Run (or resume) one slice thread with project-mode cfg overlaid
     (remaining budget, gate policy, merge_on_approval, fresh_clone=False).
-    Returns 0 green, 1 parked/failed, 3 budget, HUMAN_ACTION_NEEDED at a gate.
+    Returns 0 green, 1 parked/failed, 3 budget, RATE_LIMITED when the account
+    refused, HUMAN_ACTION_NEEDED at a gate.
     """
-    from .models import BudgetExceeded
+    from .models import BudgetExceeded, RateLimited
 
     cfg = {**project.cfg, **overlay}
     cm, app = _open_app(project)
@@ -600,6 +629,12 @@ def _drive_slice(project, chosen, overlay: dict) -> int:
                   f"run-project to continue")
             return HUMAN_ACTION_NEEDED
         return _report(res, project, chosen)
+    except RateLimited as e:
+        # MUST precede the RuntimeError arm below (RateLimited subclasses it):
+        # the crash advice — "re-run to resume" — is actively wrong here, and
+        # run-project loops over slices, so it would walk straight back into
+        # the same wall on the next one.
+        return _report_rate_limited(e, project.slug, chosen.id)
     except BudgetExceeded as e:
         print(f"\nABORTED (budget): {e}", file=sys.stderr)
         return 3
@@ -629,6 +664,7 @@ def _cmd_run_project(args) -> int:
     far as it can and exits at the first decision a human owns.
     """
     from . import planner as planmod
+    from .models import RateLimited
 
     try:
         project = cfgmod.discover(args.slug, args.workspace)
@@ -657,6 +693,8 @@ def _cmd_run_project(args) -> int:
             plan = planmod.plan_slices(
                 project, budget_usd=project_budget - spent,
                 log_path=livelog.path_for(str(project.dir), "project"))
+        except RateLimited as e:
+            return _report_rate_limited(e, args.slug, None)
         except planmod.PlanError as e:
             print(f"\nplan failed: {e}", file=sys.stderr)
             return 1
@@ -706,6 +744,8 @@ def _cmd_run_project(args) -> int:
                 planmod.author_oracle(
                     project, planned, budget_usd=remaining,
                     log_path=livelog.path_for(str(project.dir), "project"))
+            except RateLimited as e:
+                return _report_rate_limited(e, args.slug, planned["id"])
             except planmod.PlanError as e:
                 print(f"\noracle draft failed: {e}", file=sys.stderr)
                 return 1

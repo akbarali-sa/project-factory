@@ -140,12 +140,26 @@ def plan_slices(project: cfgmod.Project, *, usage: Usage | None = None,
         "sync, conflict resolution), events whose open questions block "
         "specification, or pure off-system context. Do not park something "
         "merely because it is late in the flow.\n"
-        "  * Slice ids: snake_case, prefixed 'slice_'.\n\n"
+        "  * Slice ids: snake_case, prefixed 'slice_'.\n"
+        # Learned the expensive way: four correct vertical slices are not a
+        # product. On the first full run every screen shipped and worked, and
+        # four of them were reachable ONLY by typing a URL, because no slice
+        # owned navigation. The gap had to be closed by hand after the run.
+        "  * FINALLY, always add ONE horizontal slice as the LAST wave, with "
+        '"kind": "horizontal" and an empty event_ids list. Vertical slices '
+        "deliver screens; nothing makes them one application. This slice owns "
+        "the hub/index screen for the primary aggregate, the global navigation "
+        "covering every top-level workflow, the cross-links between screens "
+        "that belong to one user journey, and whatever list endpoint the index "
+        "needs. Without it the delivered app has screens no user can reach.\n\n"
         f"Project: {board.get('name')}\n\n"
         f"In-scope business events:\n{json.dumps(digest, indent=1)}\n\n"
         "Return ONLY JSON:\n"
         '{"slices": [{"id": "slice_...", "name": "...", "wave": 1, '
         '"bounded_context": "...", "event_ids": ["be_..."], '
+        '"rationale": "..."}, '
+        '{"id": "slice_navigation_and_hub", "name": "...", "wave": <last>, '
+        '"kind": "horizontal", "bounded_context": "...", "event_ids": [], '
         '"rationale": "..."}], '
         '"out_of_scope": [{"id": "be_...", "reason": "..."}]}',
         usage=usage, budget_usd=budget_usd, log_path=log_path,
@@ -183,8 +197,28 @@ def validate_plan(plan: dict, in_scope_events: list[dict]) -> list[str]:
             errors.append(f"bad slice id '{sid}' (want slice_<snake_case>)")
         if not isinstance(s.get("wave"), int) or s["wave"] < 1:
             errors.append(f"{sid}: wave must be an int >= 1")
-        if not s.get("event_ids"):
+        # A horizontal slice OWNS no events — it composes what earlier waves
+        # already shipped into one navigable product. Demanding event_ids of it
+        # would force it to claim events another slice owns, which the
+        # "event in two slices" check below would then (correctly) reject.
+        if not s.get("event_ids") and s.get("kind") != "horizontal":
             errors.append(f"{sid}: no event_ids")
+
+    # Exactly one horizontal slice, and it must come last: it links screens, so
+    # every screen has to exist before it runs. A horizontal slice in wave 2 of
+    # 4 would wire up half a product and call the project done.
+    horizontals = [s for s in slices if s.get("kind") == "horizontal"]
+    if len(horizontals) > 1:
+        errors.append(f"more than one horizontal slice: "
+                      f"{[s.get('id') for s in horizontals]}")
+    if horizontals:
+        h = horizontals[0]
+        top = max((s.get("wave") or 0) for s in slices)
+        if h.get("wave") != top:
+            errors.append(f"{h.get('id')}: horizontal slice must be the last "
+                          f"wave (is {h.get('wave')}, last is {top})")
+        if not h.get("rationale"):
+            errors.append(f"{h.get('id')}: horizontal slice needs a rationale")
 
     board_ids = {e["id"] for e in in_scope_events}
     assigned: dict[str, str] = {}
@@ -228,22 +262,57 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
         return target
 
     board = json.loads(project.board_path.read_text())
-    events = [e for e in board.get("business_events", [])
-              if e["id"] in set(planned["event_ids"])]
+    horizontal = planned.get("kind") == "horizontal"
+    if horizontal:
+        # It owns no events, so "its" events would be an empty list and the
+        # agent would author scenarios for nothing. Give it every event the
+        # earlier waves DID ship: those are the screens it has to connect.
+        owned = {eid for s in (load_plan(project) or {}).get("slices", [])
+                 for eid in (s.get("event_ids") or [])}
+        events = [e for e in board.get("business_events", []) if e["id"] in owned]
+    else:
+        events = [e for e in board.get("business_events", [])
+                  if e["id"] in set(planned["event_ids"])]
     exemplar = _EXEMPLAR.read_text()
 
-    prompt = (
+    kind_brief = (
+        "Author the ORACLE for the project's HORIZONTAL slice — the one that "
+        "turns already-delivered screens into a usable application. It owns no "
+        "business events of its own; the events below are what EARLIER waves "
+        "shipped, and they are the screens this slice must connect.\n\n"
+        "Specify, as scenarios:\n"
+        "  * a hub/index screen listing the primary aggregate, including its "
+        "empty, loading and error states;\n"
+        "  * global navigation reaching every top-level workflow, with the "
+        "correct entry marked current for a given URL;\n"
+        "  * cross-links between screens in one user journey (from a list row "
+        "to its detail, from a detail to each workflow scoped to it);\n"
+        "  * whatever list endpoint the index needs, with its auth rules.\n\n"
+        "The binding requirement: after this slice, EVERY screen the project "
+        "delivered is reachable by clicking from the landing page. No user "
+        "should ever have to type a URL. Write at least one e2e scenario that "
+        "walks that path click by click.\n\n"
+    ) if horizontal else (
         "Author the ORACLE for one vertical slice: the scenarios file the Test "
         "Author will convert into executable tests, and the single source of "
         "truth for correctness. Implementers never see or edit it.\n\n"
+    )
+
+    prompt = (
+        kind_brief +
+        "This file is the single source of truth for correctness; "
+        "implementers never see or edit it.\n\n"
         "Hold yourself to the standard of this exemplar (structure, precision, "
         "explicit rejection paths, test-data strategy). Copy its FORM, never "
         "its domain content:\n\n"
         f"```yaml\n{exemplar}\n```\n\n"
         f"Slice to author (from the approved project plan):\n"
         f"{json.dumps({k: planned[k] for k in ('id', 'name', 'wave', 'bounded_context', 'event_ids')}, indent=1)}\n\n"
-        f"Full board events for this slice:\n{json.dumps(events, indent=1)[:20000]}\n\n"
-        "Requirements:\n"
+        + (f"Events shipped by earlier waves — the screens to connect, NOT "
+           f"behaviour to respecify:\n{json.dumps(events, indent=1)[:20000]}\n\n"
+           if horizontal else
+           f"Full board events for this slice:\n{json.dumps(events, indent=1)[:20000]}\n\n")
+        + "Requirements:\n"
         "  * slice.id / wave / bounded_context must match the plan exactly; "
         "approved_by/approved_at stay null.\n"
         "  * Keep the exemplar's starter_constraints block VERBATIM — it is "
@@ -252,12 +321,18 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
         "given/when/then with concrete values and explicit HTTP status codes.\n"
         "  * Cover the happy path AND every rejection/validation path the "
         "board's acceptance criteria imply.\n"
-        "  * Scenarios may trace only to this slice's events (or to SC-/WEB- "
-        "ids for e2e). An event whose open questions block specification goes "
-        "under provisional_scenarios with blocked_by, NOT under scenarios.\n"
-        "  * Behaviour needing data from earlier waves belongs to those waves "
-        "— reference it in given, do not respecify it.\n\n"
-        "Return ONLY the YAML document (no fences, no commentary)."
+        + ("  * This slice owns no events, so traces_to carries its own "
+           "SC-/WEB-/E2E- ids. Never restate an earlier wave's behaviour as a "
+           "scenario here: assume its data exists, set it up in given, and "
+           "assert only reachability, listing, navigation and linking.\n\n"
+           if horizontal else
+           "  * Scenarios may trace only to this slice's events (or to SC-/WEB- "
+           "ids for e2e). An event whose open questions block specification "
+           "goes under provisional_scenarios with blocked_by, NOT under "
+           "scenarios.\n"
+           "  * Behaviour needing data from earlier waves belongs to those "
+           "waves — reference it in given, do not respecify it.\n\n")
+        + "Return ONLY the YAML document (no fences, no commentary)."
     )
 
     errors: list[str] = []

@@ -111,6 +111,55 @@ class BudgetExceeded(RuntimeError):
     """Circuit breaker — abort the run rather than burn the ceiling."""
 
 
+class RateLimited(RuntimeError):
+    """
+    The CLI refused the call because of an ACCOUNT limit, not because anything
+    the factory produced is wrong.
+
+    Worth its own type because the remedy is the opposite of a crash's. A crash
+    says "re-run to resume, only the crashed node re-runs" — sound advice that,
+    applied to a rate limit, produces an immediate identical failure and (on an
+    unattended `run-project`) a resume loop against a window that has not moved.
+    A rate limit says "resume AFTER the window resets".
+
+    On a subscription seat the binding limit is usually the WEEKLY one, so the
+    wait is days, not minutes: an overnight run that stops at 3am must not look
+    like broken code in the morning.
+    """
+
+
+# Substrings that mean "the account/service refused", not "the work failed".
+# Matched against the CLI's own error output only — never against test output,
+# where these words legitimately appear (a test named "rate limit" is not a
+# rate limit). Keep specific: `limit` alone would match far too much.
+_RATE_LIMIT_MARKERS = (
+    "rate limit", "rate_limit", "rate-limit",
+    "usage limit", "usage_limit",
+    "quota", "429",
+    "overloaded", "overloaded_error",
+    "credit balance", "insufficient credit",
+    "limit reached", "limit exceeded",
+)
+
+
+def _rate_limit_reason(*texts: str | None) -> str | None:
+    """The matched marker and a slice of surrounding context, or None.
+
+    Returns context rather than a bare bool so the operator sees the CLI's own
+    words — including any "resets at" timestamp it volunteered, which is the
+    one piece of information that decides when to resume.
+    """
+    for text in texts:
+        if not text:
+            continue
+        low = text.lower()
+        for marker in _RATE_LIMIT_MARKERS:
+            i = low.find(marker)
+            if i != -1:
+                return " ".join(text[max(0, i - 120): i + 240].split())
+    return None
+
+
 def _summarize_stream_event(evt: dict) -> str | None:
     """One human-readable line for a stream-json event, or None to skip it
     (thinking-token counters, tool_result echoes, etc. are noise for a live
@@ -145,6 +194,12 @@ def _claude_streaming(cmd: list[str], cwd: str | None, timeout: int,
     proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=1)
     result: dict | None = None
+    # stderr is merged into stdout here, so the CLI's own plain-text refusals
+    # ("usage limit reached", an overload notice) arrive as lines that fail to
+    # parse as JSON. They used to be dropped on the floor, which is precisely
+    # why a rate limit surfaced as the opaque "produced no result event".
+    # Keep the last few so the failure can explain itself.
+    noise: list[str] = []
     try:
         for raw in livelog.iter_lines_with_timeout(proc, timeout):
             raw = raw.strip()
@@ -153,6 +208,8 @@ def _claude_streaming(cmd: list[str], cwd: str | None, timeout: int,
             try:
                 evt = json.loads(raw)
             except json.JSONDecodeError:
+                noise.append(raw[:500])
+                del noise[:-20]
                 continue
             if evt.get("type") == "result":
                 result = evt
@@ -164,9 +221,20 @@ def _claude_streaming(cmd: list[str], cwd: str | None, timeout: int,
         proc.wait(timeout=5)
 
     if result is None:
-        raise RuntimeError(f"claude[{agent}] produced no result event (exit={proc.returncode})")
+        why = _rate_limit_reason("\n".join(noise))
+        if why:
+            livelog.append(log_path, f"⏸ {agent} rate-limited: {why[:300]}")
+            raise RateLimited(f"claude[{agent}] refused by account limit: {why}")
+        tail = (" | last output: " + " ⏎ ".join(noise[-3:])) if noise else ""
+        raise RuntimeError(
+            f"claude[{agent}] produced no result event (exit={proc.returncode}){tail}")
     if result.get("is_error"):
-        livelog.append(log_path, f"✗ {agent} failed: {str(result.get('result',''))[:300]}")
+        detail = str(result.get("result", ""))
+        why = _rate_limit_reason(detail, "\n".join(noise))
+        if why:
+            livelog.append(log_path, f"⏸ {agent} rate-limited: {why[:300]}")
+            raise RateLimited(f"claude[{agent}] refused by account limit: {why}")
+        livelog.append(log_path, f"✗ {agent} failed: {detail[:300]}")
         raise RuntimeError(f"claude[{agent}] failed: {result.get('result')}")
     livelog.append(
         log_path,
@@ -228,6 +296,9 @@ def claude(
     else:
         proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
         if proc.returncode != 0:
+            why = _rate_limit_reason(proc.stderr, proc.stdout)
+            if why:
+                raise RateLimited(f"claude[{agent}] refused by account limit: {why}")
             raise RuntimeError(f"claude[{agent}] failed: {proc.stderr or proc.stdout}")
         payload = json.loads(proc.stdout)
 

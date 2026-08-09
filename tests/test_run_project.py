@@ -91,6 +91,62 @@ class ValidatePlanTests(unittest.TestCase):
         self.assertTrue(any("no reason" in e for e in errors))
 
 
+class HorizontalSliceTests(unittest.TestCase):
+    """
+    Four correct vertical slices are not a product. On the first full run every
+    screen worked and four of them were reachable only by typing a URL, because
+    no slice owned navigation. The horizontal slice closes that — but it owns
+    no events, so it needs an exemption from the event_ids rule and a guard
+    that keeps it last.
+    """
+
+    @staticmethod
+    def _with_horizontal(**over) -> dict:
+        h = {"id": "slice_navigation_and_hub", "name": "Navigation & hub",
+             "wave": 3, "kind": "horizontal", "bounded_context": "Product Shell",
+             "event_ids": [], "rationale": "links what waves 1-2 shipped"}
+        h.update(over)
+        p = _plan()
+        p["slices"] = [*p["slices"], h]
+        return p
+
+    def test_horizontal_slice_needs_no_events(self) -> None:
+        self.assertEqual(planner.validate_plan(self._with_horizontal(), EVENTS), [])
+
+    def test_vertical_slice_still_needs_events(self) -> None:
+        """The exemption must be keyed on kind, not on emptiness — otherwise
+        any slice that forgot its events silently becomes legal."""
+        p = self._with_horizontal()
+        p["slices"][1]["event_ids"] = []
+        errors = planner.validate_plan(p, EVENTS)
+        self.assertTrue(any("no event_ids" in e for e in errors), errors)
+
+    def test_horizontal_slice_must_be_the_last_wave(self) -> None:
+        """Wiring navigation before the screens exist wires up half a product."""
+        errors = planner.validate_plan(self._with_horizontal(wave=1), EVENTS)
+        self.assertTrue(any("last wave" in e for e in errors), errors)
+
+    def test_only_one_horizontal_slice(self) -> None:
+        p = self._with_horizontal()
+        p["slices"].append({"id": "slice_more_shell", "name": "More", "wave": 3,
+                            "kind": "horizontal", "event_ids": [],
+                            "rationale": "second one"})
+        errors = planner.validate_plan(p, EVENTS)
+        self.assertTrue(any("more than one horizontal" in e for e in errors), errors)
+
+    def test_horizontal_slice_needs_a_rationale(self) -> None:
+        errors = planner.validate_plan(self._with_horizontal(rationale=""), EVENTS)
+        self.assertTrue(any("rationale" in e for e in errors), errors)
+
+    def test_horizontal_slice_does_not_absorb_unaccounted_events(self) -> None:
+        """It must not become a dumping ground: parking still has to be
+        explicit, with a reason."""
+        p = self._with_horizontal()
+        p["out_of_scope"] = []
+        errors = planner.validate_plan(p, EVENTS)
+        self.assertTrue(any("be_synced" in e for e in errors), errors)
+
+
 def _oracle_yaml(**slice_overrides) -> str:
     sl = {"id": "slice_ingestion", "name": "Ingestion", "wave": 1,
           "bounded_context": "Packing List Ingestion",
@@ -562,6 +618,51 @@ class MergeToMainTests(unittest.TestCase):
             self.assertEqual(git("rev-parse", "HEAD").strip(), sha)
             # --no-ff: the merge commit has two parents
             self.assertEqual(len(git("show", "-s", "--format=%P", "HEAD").split()), 2)
+
+
+class RateLimitDetection(unittest.TestCase):
+    """
+    A rate limit and a broken generation both arrive as a non-zero CLI exit.
+    Telling them apart is what stops an unattended run from printing "crashed
+    mid-node — re-run to resume" at 3am and then looping into the same wall.
+    """
+
+    def test_account_limit_is_recognised(self):
+        from project_factory.models import _rate_limit_reason
+        for text in (
+            "Claude usage limit reached. Your limit will reset at 4:00 PM.",
+            "API Error: 429 Too Many Requests",
+            "overloaded_error: server is overloaded",
+            "Your credit balance is too low to access the Anthropic API",
+        ):
+            self.assertIsNotNone(_rate_limit_reason(text), text)
+
+    def test_reason_carries_the_reset_context(self):
+        from project_factory.models import _rate_limit_reason
+        why = _rate_limit_reason(
+            "Claude usage limit reached. Your limit will reset at 4:00 PM.")
+        self.assertIn("reset", why)
+
+    def test_ordinary_failures_are_not_mistaken_for_limits(self):
+        """The costly false positive: a real defect silently reported as a
+        pause would leave the operator waiting for a window that was never
+        the problem."""
+        from project_factory.models import _rate_limit_reason
+        for text in (
+            "TypeError: Cannot read properties of undefined (reading 'id')",
+            "1 failed\n  [chromium] > scan-screen.test.ts:228 > WEB-004",
+            "error TS2345: Argument of type 'string' is not assignable",
+            "Error: connect ECONNREFUSED 127.0.0.1:3001",
+            "prisma migrate failed: relation \"Container\" already exists",
+        ):
+            self.assertIsNone(_rate_limit_reason(text), text)
+
+    def test_rate_limited_is_a_runtime_error_but_distinguishable(self):
+        """It must stay catchable by existing `except RuntimeError` arms —
+        those are the crash-reporting safety nets — while the RateLimited arm
+        placed ABOVE them wins."""
+        from project_factory.models import RateLimited
+        self.assertTrue(issubclass(RateLimited, RuntimeError))
 
 
 if __name__ == "__main__":
