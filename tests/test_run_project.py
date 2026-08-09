@@ -278,6 +278,34 @@ class SpliceSchemaTests(unittest.TestCase):
         self.assertIn("model CountEntry {", out)
 
 
+class AllocatePortsTests(unittest.TestCase):
+    """api and web must never receive the same port: the api binds it, the web
+    spawn dies with EADDRINUSE, and the web health check then passes against
+    the API — so every e2e test runs web pages against a REST server."""
+
+    def test_distinct_ports_when_bases_collide_after_scan(self) -> None:
+        from project_factory import infra
+        busy = {3000, 3001, 3002, 3003}
+        real_free = infra._free
+        infra._free = lambda p: p not in busy  # noqa: SLF001 - test seam
+        try:
+            api, web = infra.allocate_ports(3001, 3000)
+        finally:
+            infra._free = real_free
+        self.assertNotEqual(api, web)
+        self.assertNotIn(api, busy)
+        self.assertNotIn(web, busy)
+
+    def test_free_bases_are_used_as_is(self) -> None:
+        from project_factory import infra
+        real_free = infra._free
+        infra._free = lambda p: True  # noqa: SLF001 - test seam
+        try:
+            self.assertEqual(infra.allocate_ports(3001, 3000), (3001, 3000))
+        finally:
+            infra._free = real_free
+
+
 class AggregateCheckTests(unittest.TestCase):
     """4b must judge the SPLICED schema too: a later slice's oracle lists
     aggregates it only reads (wave 1's PackingList), and forcing a pointless

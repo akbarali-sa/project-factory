@@ -172,13 +172,25 @@ def postgres_reachable(host: str, port: int, timeout: float = 3.0) -> bool:
 
 
 def allocate_ports(base_api: int, base_web: int) -> tuple[int, int]:
+    """
+    Distinct free ports for api and web.
+
+    `taken` is the whole point: scanning each base independently hands BOTH
+    services the same port whenever the low ports are busy (defaults 3001/3000
+    with 3000-3003 occupied → 3004 twice). The api then binds it, the web spawn
+    dies with EADDRINUSE, and the web health check passes against the API —
+    so the run tests every web page against a REST server and fails everything
+    with a timeout that looks like a product bug.
+    """
+    taken: set[int] = set()
     out = []
     for base in (base_api, base_web):
         p = base
-        while not _free(p):
+        while p in taken or not _free(p):
             p += 1
             if p > base + 50:
                 raise RuntimeError(f"no free port near {base}")
+        taken.add(p)
         out.append(p)
     return out[0], out[1]
 
@@ -361,10 +373,26 @@ def launch_stack(repo: str, stack: Stack) -> str:
     if not _wait_http(f"{stack.api_url}/health") and not _wait_http(stack.api_url):
         raise RuntimeError("api never became healthy:\n" + tail("api"))
 
+    if stack.web_port == stack.api_port:
+        # Belt to allocate_ports' braces: a collision here is unrecoverable and
+        # masquerades as healthy (the api answers the web URL), so it must be
+        # loud rather than merely unlikely.
+        raise RuntimeError(
+            f"api and web are both assigned port {stack.api_port} — refusing "
+            "to launch (see infra.allocate_ports)")
+
     _processes["web"] = _spawn_app("web", ["pnpm", "--filter=@repo/web", "dev"],
                                    repo, {**env, "PORT": str(stack.web_port)})
     if not _wait_http(stack.web_url):
         raise RuntimeError("web never became healthy:\n" + tail("web"))
+    if (proc := _processes.get("web")) is not None and proc.poll() is not None:
+        # Something else is answering the web URL — our own web process is
+        # already dead (EADDRINUSE is the usual reason). Health-checking a URL
+        # only proves SOMEONE is listening, not that it is the app under test.
+        raise RuntimeError(
+            f"web process exited (code {proc.returncode}) while "
+            f"{stack.web_url} still answers — another process owns that "
+            "port:\n" + tail("web"))
 
     return f"api={stack.api_url} web={stack.web_url} (postgres in docker)"
 
