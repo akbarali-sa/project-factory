@@ -223,7 +223,10 @@ def provision_db(state: S) -> dict:
     EMPTY starting state.
     """
     cfg, slug = state["cfg"], repo_mod.slugify(state["cfg"]["project_slug"])
-    api_port, web_port = infra.allocate_ports(
+    # Sticky per PROJECT, not per slice: the generated app keeps one address
+    # across every wave, so the integrated product is always at the same URL.
+    api_port, web_port = infra.sticky_ports(
+        state["project_dir"], state["repo_path"],
         cfg.get("api_port", 3001), cfg.get("web_port", 3000))
     stack = infra.Stack(
         project_slug=slug,

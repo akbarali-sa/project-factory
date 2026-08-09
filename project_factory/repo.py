@@ -157,6 +157,10 @@ def create_branch(repo: str, branch: str) -> None:
         _run(["git", "switch", branch], cwd=repo)
 
 
+def current_branch(repo: str) -> str:
+    return _run(["git", "branch", "--show-current"], cwd=repo).stdout.strip()
+
+
 def merge_to_main(repo: str, branch: str) -> str:
     """
     Fold an approved slice branch into main (--no-ff so the slice stays a

@@ -42,6 +42,7 @@ WHY api/web ARE NOT IN DOCKER (for slice 1)
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import shutil
@@ -395,6 +396,51 @@ def launch_stack(repo: str, stack: Stack) -> str:
             "port:\n" + tail("web"))
 
     return f"api={stack.api_url} web={stack.web_url} (postgres in docker)"
+
+
+def sticky_ports(project_dir: str, repo: str, base_api: int,
+                 base_web: int) -> tuple[int, int]:
+    """
+    The SAME api/web ports for every slice of a project, remembered in
+    .factory/state.json.
+
+    Without this, each slice allocates fresh: a previous slice's servers are
+    still listening, so allocate_ports increments past them and slice N lands
+    on 3004 while slice N-1 sits on 3000. The generated app then has no stable
+    address — which matters most at the end, when the whole integrated product
+    is what you want to open and click through.
+
+    Ports we allocated before are reclaimed by killing the listener when it is
+    OURS (a previous slice's leftover); a foreign squatter forces a fresh
+    allocation instead, since taking someone else's port is never ok.
+    """
+    state_file = pathlib.Path(project_dir) / ".factory" / "state.json"
+    state: dict = {}
+    if state_file.exists():
+        try:
+            state = json.loads(state_file.read_text())
+        except json.JSONDecodeError:
+            state = {}
+
+    saved = state.get("ports") or {}
+    api, web = saved.get("api"), saved.get("web")
+    if isinstance(api, int) and isinstance(web, int) and api != web:
+        for port in (api, web):
+            for pid in _pids_listening(port):
+                if _owned_by_repo(pid, repo):
+                    try:
+                        os.kill(pid, 9)
+                    except ProcessLookupError:
+                        pass
+        time.sleep(1)
+        if _free(api) and _free(web):
+            return api, web
+
+    api, web = allocate_ports(base_api, base_web)
+    state["ports"] = {"api": api, "web": web}
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(json.dumps(state, indent=2) + "\n")
+    return api, web
 
 
 def _pids_listening(port: int) -> list[int]:

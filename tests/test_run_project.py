@@ -297,6 +297,27 @@ class AllocatePortsTests(unittest.TestCase):
         self.assertNotIn(api, busy)
         self.assertNotIn(web, busy)
 
+    def test_sticky_ports_reuse_the_same_pair_across_slices(self) -> None:
+        """Every slice of a project must get ONE address, so the integrated
+        app is always at the same URL — slice 3 landing on 3004 while slice 1
+        sits on 3000 is exactly what this prevents."""
+        from project_factory import infra
+        with tempfile.TemporaryDirectory() as td:
+            real_free, real_pids = infra._free, infra._pids_listening
+            infra._free = lambda p: True          # noqa: SLF001 - test seam
+            infra._pids_listening = lambda p: []  # noqa: SLF001 - test seam
+            try:
+                first = infra.sticky_ports(td, td, 3001, 3000)
+                # Second slice: ports now "busy" — but they are ours, so the
+                # same pair comes back rather than drifting upward.
+                second = infra.sticky_ports(td, td, 3001, 3000)
+            finally:
+                infra._free, infra._pids_listening = real_free, real_pids
+            self.assertEqual(first, second)
+            saved = json.loads(
+                (pathlib.Path(td) / ".factory" / "state.json").read_text())
+            self.assertEqual(saved["ports"], {"api": first[0], "web": first[1]})
+
     def test_free_bases_are_used_as_is(self) -> None:
         from project_factory import infra
         real_free = infra._free

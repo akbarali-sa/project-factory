@@ -34,6 +34,7 @@ import sys
 from . import config as cfgmod
 from . import infra
 from . import livelog
+from . import repo as repo_mod
 
 
 # -----------------------------------------------------------------------------
@@ -177,6 +178,59 @@ def _cmd_new(args) -> int:
         print("\nNext: author the scenarios — this is the ORACLE, the "
               "highest-value work in the pipeline. Then:")
         print(f"  python -m project_factory run {args.slug} --dry-run")
+    return 0
+
+
+def _cmd_serve(args) -> int:
+    """
+    Run the INTEGRATED product: everything merged onto main, on the project's
+    sticky ports. This is the acceptance-testing entry point — one app, all
+    waves, one URL — as opposed to `run`, which brings a stack up as a side
+    effect of building one slice.
+    """
+    try:
+        project = cfgmod.discover(args.slug, args.workspace)
+    except cfgmod.ConfigError as e:
+        print(f"config error:\n{e}", file=sys.stderr)
+        return 2
+
+    repo = str(project.repo_path)
+    if not project.repo_path.exists():
+        print(f"no repo yet at {repo} — run the project first", file=sys.stderr)
+        return 2
+
+    branch = repo_mod.current_branch(repo)
+    if args.stop:
+        infra.stop_stack()
+        print(f"stopped any factory-launched stack for {args.slug}")
+        return 0
+    if branch != "main" and not args.allow_branch:
+        print(f"repo is on '{branch}', not main — `serve` exists to exercise "
+              f"the INTEGRATED product.\n"
+              f"  git -C {repo} switch main    (or pass --allow-branch)",
+              file=sys.stderr)
+        return 2
+
+    slug = repo_mod.slugify(project.slug)
+    api_port, web_port = infra.sticky_ports(
+        str(project.dir), repo,
+        project.cfg.get("api_port", 3001), project.cfg.get("web_port", 3000))
+    stack = infra.Stack(
+        project_slug=slug, api_port=api_port, web_port=web_port,
+        db_name=slug.replace("-", "_"),
+        db_host=project.cfg.get("db_host", "localhost"),
+        db_port=project.cfg.get("db_port", 5432),
+        db_user=project.cfg.get("db_user", "postgres"),
+        db_password=project.cfg.get("db_password", "postgres"),
+    )
+    infra.write_env(repo, stack, project.cfg.get("jwt_secret", "factory-local-dev"))
+    print(f"branch      {branch}")
+    print(f"slices      {len(project.state.get('completed_slices', []))} delivered")
+    print(infra.launch_stack(repo, stack))
+    print(f"\n  web  {stack.web_url}   (sign in as john.doe@example.com — "
+          f"ADMIN; jane.doe@ / mark.s@ are OPERATORs)")
+    print(f"  api  {stack.api_url}/api/docs")
+    print("\nThe stack keeps running after this command returns.")
     return 0
 
 
@@ -750,6 +804,16 @@ def main(argv: list[str] | None = None) -> int:
                     help="stop after N completed slices (checkpointing a "
                          "long project into sessions)")
     rp.set_defaults(fn=_cmd_run_project)
+
+    sv = sub.add_parser("serve",
+                        help="run the INTEGRATED product (main, all delivered "
+                             "slices) on the project's sticky ports")
+    sv.add_argument("slug")
+    sv.add_argument("--allow-branch", action="store_true",
+                    help="serve whatever branch is checked out instead of "
+                         "requiring main")
+    sv.add_argument("--stop", action="store_true", help="stop the stack")
+    sv.set_defaults(fn=_cmd_serve)
 
     apl = sub.add_parser("approve-plan",
                          help="record human approval of specs/project-plan.json "
