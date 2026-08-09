@@ -157,6 +157,24 @@ def create_branch(repo: str, branch: str) -> None:
         _run(["git", "switch", branch], cwd=repo)
 
 
+def index_with_graft(repo: str) -> str:
+    """
+    Build/refresh the generated repo's graft graph.
+
+    Best effort by design — an unindexed repo is a slower debugging session,
+    never a failed slice, so this must not be able to break a run. Worth doing
+    because the generated repo is where the diagnosis work actually happens:
+    "who else uses this helper", "where is this component" are one graft call
+    there instead of several greps. `build` is the free, no-key pass.
+    """
+    if shutil.which("graft") is None:
+        return "graft not installed — skipping index"
+    p = _run(["graft", "build", "."], cwd=repo, timeout=600, check=False)
+    if p.returncode != 0:
+        return f"graft index skipped: {(p.stdout + p.stderr).strip()[-160:]}"
+    return "graft index refreshed"
+
+
 def current_branch(repo: str) -> str:
     return _run(["git", "branch", "--show-current"], cwd=repo).stdout.strip()
 

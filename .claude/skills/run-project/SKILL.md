@@ -12,6 +12,32 @@ stuck-vs-slow diagnosis, checkpoint surgery, sleep artifacts, prisma gotchas —
 is the `run-slice` skill and applies unchanged to every slice a project run
 drives; read it first if you haven't.
 
+## Before you debug anything: query the graphs, don't rediscover
+
+The first full project run lost roughly **8 of 18 hours** to failures already
+described in the vault, because the notes were written after each incident
+and never read before the next one. Do these three things FIRST — they cost
+seconds:
+
+1. **Vault** — search `factory vault` for the symptom before reasoning about
+   it. The whole class of "every e2e test fails" is already solved there:
+   `Lessons/When every e2e test fails, suspect the stack not the code`,
+   `Lessons/Agent-authored e2e tests fail in a few recurring mechanical ways`,
+   `Lessons/Hydration races are a real product risk in generated UIs`.
+2. **graft in the GENERATED repo** — `finish` now runs `graft build` there
+   after every slice, so `graft ask "where is X" --source`, `graft grep`,
+   `graft callers` all work inside `<workspace>/<slug>/repo`. Use them
+   instead of grepping; the debugging happens in that repo, not the factory.
+3. **graft in the factory repo** — same, for pipeline questions.
+
+> [!warning] The specific trap
+> An e2e failure list that includes PREVIOUSLY DELIVERED slices' tests is
+> almost never a regression — it means the app under test is not running, or
+> is not the app you think. Check the stack (`lsof -iTCP -sTCP:LISTEN -P |
+> grep :300`, then curl the web URL and confirm it returns HTML, not a JSON
+> `statusCode`) before reading a single assertion. Three slices' entire
+> diagnose budgets went to this.
+
 ## What changes vs. slice mode — read this first
 
 * **The oracle is agent-drafted, not hand-authored.** An Opus `oracle_author`

@@ -573,7 +573,12 @@ def finish(state: S) -> dict:
               f"- by agent: {json.dumps({k: round(v,3) for k,v in state['usage'].by_agent.items()})}\n"),
         remote=state["cfg"].get("git_remote"),
     )
-    return {"status": "parked" if parked else "green", "log": [f"pr: {pr}"]}
+    # Index the delivered code so the NEXT slice (and any human or agent
+    # debugging this one at its gate) can query the graph instead of grepping.
+    # Best effort: never fails the slice.
+    graft_note = repo_mod.index_with_graft(state["repo_path"])
+    return {"status": "parked" if parked else "green",
+            "log": [f"pr: {pr}", f"graft: {graft_note}"]}
 
 
 def gate_pr(state: S) -> dict:
