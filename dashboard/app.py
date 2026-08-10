@@ -486,11 +486,15 @@ def list_projects():
 # first run, and 'no CLI' means giving them an editor here.
 # -----------------------------------------------------------------------------
 def _validate_board(obj: Any) -> dict:
+    """Validates the NORMALIZED view (a {root, subprocess_boards} tree export
+    is accepted) but returns the ORIGINAL object — what lands in specs/ is the
+    file the architect exported, not our flattening of it."""
     if not isinstance(obj, dict):
         raise HTTPException(400, "board must be a JSON object")
-    if not obj.get("name"):
+    flat = cfgmod.normalize_board(obj)
+    if not flat.get("name"):
         raise HTTPException(400, "board is missing 'name'")
-    if not isinstance(obj.get("business_events"), list) or not obj["business_events"]:
+    if not isinstance(flat.get("business_events"), list) or not flat["business_events"]:
         raise HTTPException(400, "board needs a non-empty 'business_events' list")
     return obj
 
@@ -531,11 +535,12 @@ def _board_slice_candidates(board: dict) -> list[dict]:
     own flow order so the ingestion slice naturally lands before the ones
     that consume its data.
     """
+    board = cfgmod.normalize_board(board)
     flow_order = {f.get("name"): i for i, f in enumerate(board.get("flows", []))}
     groups: dict[str, list[dict]] = {}
     for e in board.get("business_events", []):
         bc = e.get("bounded_context") or ""
-        if not bc or "Out-of-Scope" in bc:
+        if not bc or not cfgmod.event_in_scope(e):
             continue
         groups.setdefault(bc, []).append({"id": e["id"], "name": e["name"]})
     ordered = sorted(groups.items(), key=lambda kv: flow_order.get(kv[0], 99))

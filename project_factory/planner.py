@@ -95,13 +95,15 @@ def plan_is_approved(plan: dict | None) -> bool:
 # Board digest — what the planner sees
 # -----------------------------------------------------------------------------
 def _board_events(board: dict) -> tuple[list[dict], list[dict]]:
-    """(in_scope, out_of_scope) events, same rule as graph.ingest."""
+    """(in_scope, out_of_scope) events, same rule as graph.ingest
+    (config.event_in_scope: out_of_scope flag, Deferred card, or legacy
+    bounded-context marker)."""
     in_scope, out = [], []
     for e in board.get("business_events", []):
-        if "Out-of-Scope" in (e.get("bounded_context") or ""):
-            out.append(e)
-        else:
+        if cfgmod.event_in_scope(e):
             in_scope.append(e)
+        else:
+            out.append(e)
     return in_scope, out
 
 
@@ -130,8 +132,15 @@ def plan_slices(project: cfgmod.Project, *, usage: Usage | None = None,
     """
     Partition the board into wave-ordered slices and persist the plan
     (unapproved). Raises PlanError when the agent's plan fails validation.
+
+    With a reviewed backlog present (specs/backlog.json) the plan is CONVERTED
+    deterministically instead — a co-architect already made the decomposition
+    decisions, and an agent re-deriving them from raw events is how reviewed
+    judgement gets silently replaced by plausible guesses.
     """
-    board = json.loads(project.board_path.read_text())
+    board = cfgmod.load_board(project.board_path)
+    if project.backlog_path:
+        return plan_from_backlog(project, board)
     in_scope, out_of_scope = _board_events(board)
     digest = [_digest_event(e) for e in in_scope]
 
@@ -183,6 +192,164 @@ def plan_slices(project: cfgmod.Project, *, usage: Usage | None = None,
     errors = validate_plan(plan, in_scope)
     if errors:
         raise PlanError("plan failed validation:\n  " + "\n  ".join(errors))
+
+    plan["board"] = project.board_path.name
+    plan["approved_by"] = None
+    plan["approved_at"] = None
+    save_plan(project, plan)
+    return plan
+
+
+# -----------------------------------------------------------------------------
+# Deterministic converter: reviewed backlog -> plan (no agent)
+# -----------------------------------------------------------------------------
+def _reconcile_node_ref(ref: str, event_ids: set[str]) -> str | None:
+    """Map a backlog board_node reference onto an actual event id. Handles the
+    drift a hand-written backlog accumulates: trailing '(annotation)' text,
+    suffixed ids (be_count_synced_to_server -> be_count_synced), and small
+    renames — but only when the match is UNIQUE. Returns None when unresolved:
+    the caller fails loudly, never silently drops scope."""
+    base = re.sub(r"\s*\(.*\)\s*$", "", ref).strip()
+    if base in event_ids:
+        return base
+    prefixed = [i for i in event_ids if base.startswith(i + "_")]
+    if len(prefixed) == 1:
+        return prefixed[0]
+    import difflib
+    close = difflib.get_close_matches(base, sorted(event_ids), n=2, cutoff=0.7)
+    if len(close) == 1:
+        return close[0]
+    if len(close) == 2:  # accept a clear winner, reject a coin flip
+        r0 = difflib.SequenceMatcher(None, base, close[0]).ratio()
+        r1 = difflib.SequenceMatcher(None, base, close[1]).ratio()
+        if r0 - r1 > 0.1:
+            return close[0]
+    return None
+
+
+def _story_digest(story: dict) -> dict:
+    """What a slice carries forward from a backlog story: enough for the
+    oracle author to honour the reviewed decomposition without re-reading
+    the backlog."""
+    return {k: story[k] for k in
+            ("id", "title", "wave", "status", "actor", "aggregate", "emits",
+             "depends_on", "tasks", "caveats", "blocking_questions", "nfrs")
+            if story.get(k) is not None}
+
+
+def plan_from_backlog(project: cfgmod.Project, board: dict) -> dict:
+    """
+    Convert specs/backlog.json (a co-architect's reviewed story decomposition)
+    into the project plan — deterministically, no agent call. Slicing follows
+    the backlog's epics: one vertical slice per domain epic (a bounded
+    context), stories embedded, plus the standard horizontal navigation slice
+    last. Foundation stories and spikes are recorded on the plan (the starter
+    kit covers most Foundation scaffolding; spikes deliver decisions, not
+    code) rather than becoming slices.
+
+    Scope guard: a story referencing an event the board marks out_of_scope or
+    Deferred is an error, and every board_node reference must reconcile onto a
+    real event id — unresolved references fail the plan, never vanish.
+    """
+    backlog = json.loads(project.backlog_path.read_text())
+    in_scope, excluded = _board_events(board)
+    ids = {e["id"] for e in in_scope}
+    excluded_ids = {e["id"] for e in excluded}
+
+    errors: list[str] = []
+    aliases: dict[str, str] = {}
+
+    def resolve(story: dict) -> list[str]:
+        out = []
+        for ref in story.get("board_nodes") or []:
+            got = _reconcile_node_ref(ref, ids)
+            if got is None:
+                if _reconcile_node_ref(ref, excluded_ids):
+                    errors.append(
+                        f"{story['id']}: board_node '{ref}' is out of scope / "
+                        f"Deferred on the board — a story may not price it")
+                else:
+                    errors.append(f"{story['id']}: board_node '{ref}' matches "
+                                  f"no event on the board")
+                continue
+            if got != ref:
+                aliases[ref] = got
+            out.append(got)
+        return out
+
+    epics = {e["id"]: e for e in backlog.get("epics", [])}
+    stories = backlog.get("stories", [])
+    domain_epics = sorted(
+        (e for e in epics.values() if e.get("bounded_context")),
+        key=lambda e: min((s["wave"] for s in stories if s["epic"] == e["id"]),
+                          default=99))
+    foundation = [s for s in stories
+                  if not epics.get(s["epic"], {}).get("bounded_context")]
+
+    slices, epic_slice_id = [], {}
+    for wave, epic in enumerate(domain_epics, start=1):
+        bc = epic["bounded_context"]
+        sid = "slice_" + re.sub(r"[^a-z0-9]+", "_", bc.lower()).strip("_")
+        epic_slice_id[epic["id"]] = sid
+        epic_stories = [s for s in stories if s["epic"] == epic["id"]]
+        event_ids: list[str] = []
+        for s in epic_stories:
+            event_ids.extend(eid for eid in resolve(s)
+                             if eid not in event_ids)
+        slices.append({
+            "id": sid, "name": bc, "wave": wave, "bounded_context": bc,
+            "event_ids": event_ids,
+            "stories": [_story_digest(s) for s in
+                        sorted(epic_stories, key=lambda s: s["wave"])],
+            "depends_on": [epic_slice_id[d] for d in epic.get("depends_on", [])
+                           if d in epic_slice_id],
+            "rationale": epic.get("note") or f"backlog epic {epic['id']}",
+        })
+
+    slices.append({
+        "id": "slice_navigation_and_hub",
+        "name": "Navigation & hub — one navigable application",
+        "wave": len(slices) + 1, "kind": "horizontal",
+        "bounded_context": slices[0]["bounded_context"] if slices else "",
+        "event_ids": [],
+        "rationale": "Vertical slices deliver screens; nothing makes them one "
+                     "application. Hub/index, global navigation, journey "
+                     "cross-links — every delivered screen reachable by "
+                     "clicking from the landing page.",
+    })
+
+    # Wave-order sanity from the board's own edges + policy triggers: a
+    # producer event may never sit in a LATER wave than its consumer. This is
+    # the check whose absence hid a consumer scheduled three waves before its
+    # producer (BL-007) in the artifact this converter replaces.
+    wave_of = {eid: s["wave"] for s in slices for eid in s.get("event_ids", [])}
+    dep_edges = [(e.get("from"), e.get("to")) for e in board.get("edges", [])]
+    dep_edges += [(e.get("policy", {}).get("trigger_event_id"), e["id"])
+                  for e in in_scope if (e.get("policy") or {}).get("trigger_event_id")]
+    for src, dst in dep_edges:
+        if src in wave_of and dst in wave_of and wave_of[src] > wave_of[dst]:
+            errors.append(f"wave inversion: '{dst}' (wave {wave_of[dst]}) "
+                          f"consumes '{src}' scheduled later (wave {wave_of[src]})")
+
+    unsliced = ids - set(wave_of)
+    plan = {
+        "slices": slices,
+        "out_of_scope": [{"id": eid, "reason": "in scope on the board but "
+                          "owned by no backlog story — flagged for review"}
+                         for eid in sorted(unsliced)],
+        "source": f"backlog.json (deterministic converter; "
+                  f"{len(stories)} stories, {len(domain_epics)} domain epics)",
+        "aliases": aliases,
+        "hard_constraints": backlog.get("hard_constraints", []),
+        "not_priced": backlog.get("not_priced", []),
+        "foundation": [{k: s.get(k) for k in ("id", "title", "wave", "tasks")}
+                       for s in foundation],
+        "spikes": backlog.get("spikes", []),
+    }
+
+    errors += validate_plan(plan, in_scope)
+    if errors:
+        raise PlanError("backlog conversion failed:\n  " + "\n  ".join(errors))
 
     plan["board"] = project.board_path.name
     plan["approved_by"] = None
@@ -253,6 +420,154 @@ def validate_plan(plan: dict, in_scope_events: list[dict]) -> list[str]:
 
 
 # -----------------------------------------------------------------------------
+# Agent 1.5: the assumptions register
+# -----------------------------------------------------------------------------
+def assumptions_path(project: cfgmod.Project) -> pathlib.Path:
+    return project.dir / "specs" / "assumptions.yaml"
+
+
+def load_assumptions(project: cfgmod.Project) -> dict | None:
+    p = assumptions_path(project)
+    if not p.exists():
+        return None
+    return yaml.safe_load(p.read_text())
+
+
+def draft_assumptions(project: cfgmod.Project, *, usage: Usage | None = None,
+                      budget_usd: float | None = None,
+                      log_path: pathlib.Path | None = None) -> pathlib.Path:
+    """
+    Turn the board's PENDING questions into specs/assumptions.yaml: one
+    recorded working assumption per question that blocks an in-scope event.
+    Questions the board already answers are imported verbatim as `resolved`
+    (deterministically — an agent must not paraphrase a recorded decision).
+
+    Rationale: a factory cannot wait for a client. The oracle author will
+    otherwise resolve every open question implicitly and differently per
+    slice; this register makes each resolution explicit, auditable, and
+    revisitable when the real answer arrives. Never overwrites an existing
+    file. Falls under the plan gate's accountability umbrella.
+    """
+    target = assumptions_path(project)
+    if target.exists():
+        return target
+
+    board = cfgmod.load_board(project.board_path)
+    in_scope, _ = _board_events(board)
+    pending, resolved, seen = [], [], set()
+    for e in in_scope:
+        for q in e.get("questions", []):
+            if q.get("id") in seen:
+                continue
+            seen.add(q.get("id"))
+            if q.get("status") == "answered":
+                resolved.append({
+                    "question_id": q.get("id"), "question": q.get("question"),
+                    "answer": q.get("answer"),
+                    "source": "board (recorded answer — imported verbatim)"})
+            else:
+                pending.append({
+                    "id": q.get("id"), "question": q.get("question"),
+                    "criticality": q.get("criticality", "normal"),
+                    "event_id": e["id"], "event_name": e["name"]})
+
+    backlog_ctx = ""
+    if project.backlog_path:
+        backlog = json.loads(project.backlog_path.read_text())
+        backlog_ctx = (
+            "\nReviewed-backlog context (constraints your assumptions must "
+            "not violate):\n"
+            f"hard_constraints: {json.dumps(backlog.get('hard_constraints', []), indent=1)}\n"
+            f"not_priced (choose the assumption that keeps these OUT of scope): "
+            f"{json.dumps([{k: n.get(k) for k in ('title', 'why_out', 'do_not_price')} for n in backlog.get('not_priced', [])], indent=1)}\n"
+            f"spikes (provider decisions still open — assume the most "
+            f"conventional provider-agnostic answer): "
+            f"{json.dumps([{k: s.get(k) for k in ('name', 'questions_to_close')} for s in backlog.get('spikes', [])], indent=1)}\n")
+
+    prompt = (
+        "You are recording the WORKING ASSUMPTIONS an autonomous build will "
+        "proceed on. The client is unavailable; every pending question below "
+        "blocks an in-scope event, and the build cannot wait. For EACH "
+        "pending question, choose the single most conventional, least-scope, "
+        "most-reversible answer and record it as an assumption.\n\n"
+        "Rules:\n"
+        "  * assumption = a decision, stated as fact, buildable today — never "
+        "'TBD', never a menu of options.\n"
+        "  * Prefer the reading that keeps unpriced capabilities out of "
+        "scope; never assume a deferred capability into existence.\n"
+        "  * Keep the two-role model (no third role) unless a question's own "
+        "text states otherwise.\n"
+        "  * rationale = one sentence on why this is the safe default and "
+        "what would change if the client answers differently.\n\n"
+        f"Pending questions ({len(pending)}):\n{json.dumps(pending, indent=1)}\n"
+        f"{backlog_ctx}\n"
+        "Return ONLY YAML:\n"
+        "working_assumptions:\n"
+        "  - id: a_<question_id>\n"
+        "    question_id: <question_id>\n"
+        "    criticality: <copied>\n"
+        "    assumption: <the decision>\n"
+        "    rationale: <one sentence>\n"
+        "    impacts: [<event_ids>]\n",
+        )
+
+    errors: list[str] = []
+    text = ""
+    for attempt in range(2):
+        out = claude(
+            "assumptions_author",
+            prompt if not errors
+            else prompt + "\n\nYour previous draft failed validation — fix "
+                          "exactly these and return the full YAML again:\n  "
+                          + "\n  ".join(errors),
+            attempt=attempt, usage=usage, budget_usd=budget_usd,
+            log_path=log_path)
+        text = _strip_fences(out)
+        errors = _validate_assumptions(text, pending)
+        if not errors:
+            break
+    if errors:
+        raise PlanError("assumptions draft failed validation after 2 "
+                        "attempts:\n  " + "\n  ".join(errors))
+
+    data = yaml.safe_load(text)
+    data["resolved"] = resolved
+    data["drafted_by"] = "assumptions_author (agent)"
+    data["note"] = ("Working assumptions for an autonomous run — each entry "
+                    "resolves a question the client has not answered. "
+                    "Revisit every impacted slice when real answers arrive.")
+    target.write_text(
+        "# ASSUMPTIONS REGISTER — drafted by the factory before oracle "
+        "authoring.\n# One working assumption per pending board question "
+        "blocking an in-scope event.\n# Falls under the project plan gate's "
+        "accountability.\n\n"
+        + yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+    return target
+
+
+def _validate_assumptions(text: str, pending: list[dict]) -> list[str]:
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        return [f"not valid YAML: {e}"]
+    if not isinstance(data, dict) or not isinstance(
+            data.get("working_assumptions"), list):
+        return ["missing top-level working_assumptions list"]
+    errors = []
+    covered = set()
+    for a in data["working_assumptions"]:
+        qid = a.get("question_id")
+        covered.add(qid)
+        if not a.get("assumption") or "TBD" in str(a.get("assumption", "")):
+            errors.append(f"{qid}: assumption missing or undecided")
+    critical = {q["id"] for q in pending if q.get("criticality") == "critical"}
+    missing = critical - covered
+    if missing:
+        errors.append(f"critical questions without an assumption: {sorted(missing)}")
+    return errors
+
+
+# -----------------------------------------------------------------------------
 # Agent 2: the oracle author
 # -----------------------------------------------------------------------------
 def scenarios_path_for(project: cfgmod.Project, slice_id: str) -> pathlib.Path:
@@ -272,7 +587,7 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
     if target.exists():
         return target
 
-    board = json.loads(project.board_path.read_text())
+    board = cfgmod.load_board(project.board_path)
     horizontal = planned.get("kind") == "horizontal"
     if horizontal:
         # It owns no events, so "its" events would be an empty list and the
@@ -295,6 +610,44 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
     except Exception:
         extra_nouns = []
     board_text = json.dumps(events) + json.dumps(planned)
+
+    # Reviewed-decomposition extras (present when the plan came from a
+    # backlog): the stories this slice implements, the engagement's hard
+    # constraints, the assumptions register, and the capabilities that are
+    # deliberately unpriced — which the oracle must NOT specify.
+    plan = load_plan(project) or {}
+    forbidden = _forbidden_capabilities(board)
+    extras = ""
+    if planned.get("stories"):
+        extras += ("Reviewed backlog stories this slice implements — honour "
+                   "their boundaries, task intent and caveats:\n"
+                   f"{json.dumps(planned['stories'], indent=1)[:9000]}\n\n")
+    if plan.get("hard_constraints"):
+        extras += ("HARD CONSTRAINTS (engagement-wide, non-negotiable):\n"
+                   f"{json.dumps(plan['hard_constraints'], indent=1)[:4000]}\n\n")
+    assumptions = load_assumptions(project)
+    if assumptions:
+        extras += ("APPROVED WORKING ASSUMPTIONS — treat each as decided; "
+                   "scenarios must be consistent with them (cite the "
+                   "assumption id in a scenario comment where one is "
+                   "load-bearing):\n"
+                   + yaml.safe_dump(
+                       {"working_assumptions":
+                        assumptions.get("working_assumptions", [])},
+                       sort_keys=False, allow_unicode=True)[:9000] + "\n")
+    if forbidden or plan.get("not_priced"):
+        names = [f"{f['name']} ({f['id']})" for f in forbidden]
+        behaviours = [b for n in plan.get("not_priced", [])
+                      for b in n.get("do_not_price", [])]
+        extras += (
+            "DELIBERATELY UNPRICED — the board carries Deferred cards for "
+            f"these capabilities: {names}. Your oracle must specify NOTHING "
+            "for them: no scenario, no rejection path, no test may assert "
+            "any of the following behaviours (they are the unpriced "
+            f"capabilities by the back door): {behaviours}. Where a failure "
+            "BRANCH is legitimately in scope (e.g. a sync attempt can fail), "
+            "the scenario may assert the failure is SURFACED — never that it "
+            "is retried, queued, recovered or corrected.\n\n")
 
     kind_brief = (
         "Author the ORACLE for the project's HORIZONTAL slice — the one that "
@@ -341,6 +694,7 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
            f"behaviour to respecify:\n{json.dumps(events, indent=1)[:20000]}\n\n"
            if horizontal else
            f"Full board events for this slice:\n{json.dumps(events, indent=1)[:20000]}\n\n")
+        + extras
         + "Requirements:\n"
         "  * slice.id / wave / bounded_context must match the plan exactly; "
         "approved_by/approved_at stay null.\n"
@@ -378,7 +732,8 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
         text = _strip_fences(out)
         errors = validate_oracle(text, planned, board_text=board_text,
                                  extra_nouns=extra_nouns,
-                                 require_starter=True)
+                                 require_starter=True,
+                                 forbidden=forbidden)
         if not errors:
             header = (
                 "# =============================================================================\n"
@@ -401,10 +756,29 @@ def _strip_fences(out: str) -> str:
     return m.group(1) if m else out
 
 
+def _forbidden_capabilities(board: dict) -> list[dict]:
+    """Deferred-carded events inside a REAL bounded context (not the As-Is
+    lane): capabilities the client has not bought. Scenario text mentioning
+    one means the oracle is specifying unpriced scope."""
+    out = []
+    for e in board.get("business_events", []):
+        if not e.get("deferred") or e.get("out_of_scope") \
+                or "Out-of-Scope" in (e.get("bounded_context") or ""):
+            continue
+        terms = {e["id"], e["name"]}
+        label = (e.get("event") or {}).get("label")
+        if label:
+            terms.add(label)
+        out.append({"id": e["id"], "name": e["name"], "terms": sorted(terms),
+                    "reason": "; ".join(d.get("label", "") for d in e["deferred"])})
+    return out
+
+
 def validate_oracle(text: str, planned: dict, *,
                     board_text: str | None = None,
                     extra_nouns: list[str] | None = None,
-                    require_starter: bool = False) -> list[str]:
+                    require_starter: bool = False,
+                    forbidden: list[dict] | None = None) -> list[str]:
     """Mechanical validation of a drafted oracle. Content review is the gate's
     job; this catches everything a schema can catch.
 
@@ -459,6 +833,23 @@ def validate_oracle(text: str, planned: dict, *,
     if require_starter and data.get("starter_constraints") != starter_constraints():
         errors.append("starter_constraints missing or altered — include the "
                       "block from the prompt VERBATIM")
+
+    # Unpriced-capability guard: scenario sections may not mention a Deferred
+    # capability (asserting its behaviour prices it by the back door). The
+    # out_of_scope section is exempt — naming it there as excluded is correct.
+    if forbidden:
+        scen_text = json.dumps([data.get(g) for g in
+                                ("scenarios", "web_scenarios", "e2e_scenarios",
+                                 "provisional_scenarios")])
+        for f in forbidden:
+            for term in f["terms"]:
+                if harness.mentions_noun(term, scen_text):
+                    errors.append(
+                        f"scenario text mentions '{term}' — '{f['name']}' is "
+                        f"a Deferred, unpriced capability ({f['reason']}); "
+                        "specify nothing for it (list it under out_of_scope "
+                        "instead)")
+                    break
 
     if board_text is not None:
         registry = (harness.DOMAIN_NOUNS + harness.EXEMPLAR_NOUNS

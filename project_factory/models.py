@@ -74,6 +74,12 @@ AGENT_TIER: dict[str, str] = {
     # The draft replaces hand-authoring, not human judgment: it is reviewed
     # at the project plan gate / Gate A per the project's gate policy.
     "oracle_author": "opus",
+
+    # Turns the board's open questions into an explicit working-assumptions
+    # register (specs/assumptions.yaml) before oracles are drafted. Each
+    # assumption is a decision the oracle then builds on — wrong-but-recorded
+    # beats implicit-and-scattered, so this is Opus-grade reasoning.
+    "assumptions_author": "opus",
 }
 
 # Escalate the Implementer after repeated failure: cheap first, expensive only

@@ -474,7 +474,8 @@ def collect_domain_nouns(workspace_root: str | os.PathLike,
         if exclude_project and board_path.parent.parent.name == exclude_project:
             continue
         try:
-            board = json.loads(board_path.read_text())
+            from . import config as _cfg
+            board = _cfg.normalize_board(json.loads(board_path.read_text()))
         except (OSError, json.JSONDecodeError):
             continue
         chunks: list[str] = []

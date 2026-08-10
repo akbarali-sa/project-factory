@@ -686,9 +686,13 @@ def _cmd_run_project(args) -> int:
     plan = planmod.load_plan(project)
     if not (plan and plan.get("slices")):
         if args.dry_run:
-            print("\n--dry-run: would plan slices from the board (planner, opus)")
+            print("\n--dry-run: would plan slices from the board "
+                  + ("(deterministic backlog converter)" if project.backlog_path
+                     else "(planner, opus)"))
             return 0
-        print("\nplanning slices from the board (planner, opus)…")
+        print("\nplanning slices from the board "
+              + ("(converting the reviewed backlog — no agent)…"
+                 if project.backlog_path else "(planner, opus)…"))
         try:
             plan = planmod.plan_slices(
                 project, budget_usd=project_budget - spent,
@@ -714,6 +718,24 @@ def _cmd_run_project(args) -> int:
         _print_plan(plan)
         print("\n--dry-run: nothing executed")
         return 0
+
+    # ---- phase 1.5: the assumptions register (once, before any oracle) ------
+    # Only when a reviewed backlog drove the plan: its pending questions are
+    # structured, and the oracle author consumes the register on every slice.
+    if project.backlog_path and not planmod.assumptions_path(project).exists():
+        spent = project.spent_usd()
+        print(f"\ndrafting working-assumptions register "
+              f"(assumptions_author, opus, ${project_budget - spent:.2f} remaining)…")
+        try:
+            planmod.draft_assumptions(
+                project, budget_usd=project_budget - spent,
+                log_path=livelog.path_for(str(project.dir), "project"))
+        except RateLimited as e:
+            return _report_rate_limited(e, args.slug, None)
+        except planmod.PlanError as e:
+            print(f"\nassumptions draft failed: {e}", file=sys.stderr)
+            return 1
+        print(f"assumptions register: {planmod.assumptions_path(project).name}")
 
     print()
     print(infra.preflight())

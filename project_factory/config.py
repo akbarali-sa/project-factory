@@ -115,6 +115,59 @@ def slugify(name: str) -> str:
 
 
 # -----------------------------------------------------------------------------
+# Board loading — flat exports and {root, subprocess_boards} trees
+# -----------------------------------------------------------------------------
+def normalize_board(raw: dict) -> dict:
+    """
+    One board shape for every consumer. A flat export passes through; a TREE
+    export ({"root": ..., "subprocess_boards": [...]}) is flattened: subprocess
+    events join the root's business_events (tagged with their source board id,
+    inheriting the owning process's bounded_context when they carry none) and
+    decision logs concatenate. Process nodes keep their `expands_to` so the
+    provenance stays visible.
+    """
+    if not isinstance(raw, dict):
+        return raw
+    if "root" not in raw or "business_events" in raw:
+        return raw
+    root = raw.get("root") or {}
+    board = dict(root)
+    events = [dict(e, board_id=root.get("id")) for e in root.get("business_events", [])]
+    decisions = list(root.get("decision_log") or [])
+    owner_proc = {p.get("expands_to"): p for p in root.get("processes", [])
+                  if p.get("expands_to")}
+    for sub in raw.get("subprocess_boards") or []:
+        proc = owner_proc.get(sub.get("id"))
+        for e in sub.get("business_events", []):
+            ee = dict(e, board_id=sub.get("id"))
+            if not ee.get("bounded_context") and proc:
+                ee["bounded_context"] = proc.get("bounded_context")
+            events.append(ee)
+        decisions.extend(sub.get("decision_log") or [])
+    board["business_events"] = events
+    board["decision_log"] = decisions
+    return board
+
+
+def load_board(path: pathlib.Path | str) -> dict:
+    return normalize_board(json.loads(pathlib.Path(path).read_text()))
+
+
+def event_in_scope(e: dict) -> bool:
+    """
+    The single scope rule (planner and graph.ingest must agree).
+
+    An event is OUT of scope when the board says so explicitly — the
+    machine-readable `out_of_scope` flag, a Deferred card (a risk placeholder
+    the client has not bought; building it prices unconfirmed scope), or the
+    legacy 'Out-of-Scope' bounded-context marker older exports used.
+    """
+    if e.get("out_of_scope") or e.get("deferred"):
+        return False
+    return "Out-of-Scope" not in (e.get("bounded_context") or "")
+
+
+# -----------------------------------------------------------------------------
 # Workspace resolution
 # -----------------------------------------------------------------------------
 def factory_root() -> pathlib.Path:
@@ -176,6 +229,15 @@ class Project:
     slices: list[Slice]
     cfg: dict
     state: dict = field(default_factory=dict)
+
+    @property
+    def backlog_path(self) -> pathlib.Path | None:
+        """specs/backlog.json — a co-architect's reviewed decomposition
+        (stories, waves, dependencies, scope guards). Optional; when present
+        the planner converts it deterministically instead of re-deriving a
+        plan with an agent."""
+        p = self.dir / "specs" / "backlog.json"
+        return p if p.exists() else None
 
     @property
     def repo_path(self) -> pathlib.Path:

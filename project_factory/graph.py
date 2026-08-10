@@ -122,14 +122,23 @@ def ingest(state: S) -> dict:
     # nodes on resume), so this is the right, and only, place to truncate the
     # live log — a resumed run keeps its history instead of losing it.
     livelog.reset(state["project_dir"], state["slice_id"])
-    board = json.loads(pathlib.Path(state["board_path"]).read_text())
+    board = config.load_board(state["board_path"])
     scen = yaml.safe_load(pathlib.Path(state["scenarios_path"]).read_text())
-    in_scope = [e for e in board["business_events"]
-                if "Out-of-Scope" not in (e.get("bounded_context") or "")]
+    in_scope = [e for e in board["business_events"] if config.event_in_scope(e)]
+    # Slim the decision log to this slice's neighbourhood: a reworked board
+    # of record carries 70+ entries (~170KB) — global ones and those touching
+    # this slice's events stay, each truncated; the rest are on the board.
+    slice_ids = {t for g in ("scenarios", "web_scenarios", "e2e_scenarios")
+                 for s in scen.get(g) or [] for t in s.get("traces_to") or []}
+    decisions = [
+        {**d, "text": (d.get("text") or "")[:400]}
+        for d in board.get("decision_log", [])
+        if not d.get("related_node_id") or d["related_node_id"] in slice_ids
+    ][:80]
     return {
         "ir": {"project": board["name"], "events": in_scope,
                "processes": board.get("processes", []),
-               "decisions": board.get("decision_log", [])},
+               "decisions": decisions},
         "scenarios": scen,
         "attempts": {}, "phase_out": {}, "diagnosis": {},
         "status": "pending", "usage": Usage(),
@@ -148,7 +157,7 @@ def gap_detect(state: S) -> dict:
         "id": e["id"], "name": e["name"],
         "rules": len(e["implementation"].get("business_rules", [])),
         "ac": len(e["implementation"].get("acceptance_criteria", [])),
-        "open_questions": [q["question"] for q in e.get("questions", [])
+        "open_questions": [q["question"][:200] for q in e.get("questions", [])
                            if q.get("status") != "answered"],
     } for e in state["ir"]["events"]]
 
