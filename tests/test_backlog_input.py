@@ -360,6 +360,52 @@ class ForbiddenCapabilityTests(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+class DraftAssumptionsTests(unittest.TestCase):
+    def test_prompt_is_a_string_and_file_lands(self) -> None:
+        """End-to-end through draft_assumptions with the agent stubbed —
+        catches prompt-construction defects (a stray trailing comma once made
+        the prompt a tuple and killed subprocess.Popen mid-run)."""
+        captured: dict = {}
+
+        def fake_claude(agent, prompt, **kw):
+            captured["agent"], captured["prompt"] = agent, prompt
+            return ("working_assumptions:\n"
+                    "  - id: a_q_x\n    question_id: q_x\n"
+                    "    criticality: critical\n"
+                    "    assumption: barcode is the key\n"
+                    "    rationale: safest default\n    impacts: [be_scanned]\n")
+
+        with tempfile.TemporaryDirectory() as td:
+            project = _project(td)
+            tree = _tree()
+            tree["root"]["business_events"][2]["questions"] = [
+                {"id": "q_x", "question": "key?", "criticality": "critical",
+                 "status": "pending", "answer": None},
+                {"id": "q_done", "question": "answered one?",
+                 "criticality": "normal", "status": "answered",
+                 "answer": "yes, decided"},
+            ]
+            (project.dir / "specs" / "widget.board.json").write_text(
+                json.dumps(tree))
+            orig = planner.claude
+            planner.claude = fake_claude
+            try:
+                path = planner.draft_assumptions(project)
+            finally:
+                planner.claude = orig
+            self.assertIsInstance(captured["prompt"], str)
+            self.assertEqual(captured["agent"], "assumptions_author")
+            data = __import__("yaml").safe_load(path.read_text())
+            self.assertEqual(data["working_assumptions"][0]["question_id"], "q_x")
+            self.assertEqual(data["resolved"][0]["question_id"], "q_done")
+            # never overwrites: second call returns without the agent
+            planner.claude = None  # would explode if called
+            try:
+                self.assertEqual(planner.draft_assumptions(project), path)
+            finally:
+                planner.claude = orig
+
+
 class AssumptionsValidationTests(unittest.TestCase):
     PENDING = [
         {"id": "q_key", "question": "barcode or sku?",

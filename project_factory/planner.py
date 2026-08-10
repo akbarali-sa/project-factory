@@ -508,8 +508,8 @@ def draft_assumptions(project: cfgmod.Project, *, usage: Usage | None = None,
         "    criticality: <copied>\n"
         "    assumption: <the decision>\n"
         "    rationale: <one sentence>\n"
-        "    impacts: [<event_ids>]\n",
-        )
+        "    impacts: [<event_ids>]\n"
+    )
 
     errors: list[str] = []
     text = ""
