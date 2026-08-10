@@ -21,6 +21,7 @@ run means something.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import pathlib
 import re
@@ -402,22 +403,138 @@ def check_infra_contract(repo: str) -> Result:
 # -----------------------------------------------------------------------------
 # 6. Prompt portability — the guard that makes project #2 possible
 # -----------------------------------------------------------------------------
+# Vocabulary of PAST projects' domains (project #1: barcode sorting). Domain
+# facts belong in the IR; if one of these shows up in factory code or prompt
+# assets, someone hard-coded a project into the factory.
 DOMAIN_NOUNS = [
     "container", "barcode", "warehouse", "packing list", "sku",
     "scan", "worker", "supplier", "pallet",
 ]
 
+# Vocabulary of the bundled exemplar's deliberately FICTIONAL domain (a field
+# herbarium digitisation app). These are canaries: they exist nowhere else, so
+# a drafted oracle that contains one copied the exemplar's content instead of
+# its form.
+EXEMPLAR_NOUNS = [
+    "herbarium", "specimen", "folio", "taxon", "accession",
+    "curator", "field assistant", "fieldassistant", "botanist",
+]
+
+# The subset safe to hunt in PROSE (markdown runbooks, docs, config). The
+# full DOMAIN_NOUNS list would cry wolf there — "container" is a Docker term
+# and "worker" a process role in perfectly generic infra prose — and a check
+# that cries wolf gets ignored.
+PROSE_NOUNS = [
+    "barcode", "packing list", "sku", "pallet", "warehouse", "supplier",
+] + EXEMPLAR_NOUNS
+
+# Markdown/JSON files agents read for orientation. Not model prompts in the
+# strict sense, but they anchor the orchestrating agent the same way — so
+# they get the (distinctive-noun) scan too.
+PROMPT_SURFACES = [".claude/skills", "docs", "defaults.json", "README.md"]
+
+# A markdown file carrying this marker is an explicitly labeled historical
+# case study (project #1 war stories); it is exempt from the prose scan.
+CASE_STUDY_MARKER = "<!-- factory:case-study -->"
+
+
+def mentions_noun(noun: str, text: str) -> bool:
+    """Word-prefix match: 'scan' hits 'scanned', 'folio' hits 'folios' —
+    but 'sku' does not hit inside 'askua'."""
+    return re.search(rf"\b{re.escape(noun)}", text, re.IGNORECASE) is not None
+
+
+# Words too generic to treat as domain vocabulary when harvesting nouns from
+# a board — workflow verbs and bookkeeping terms every domain shares.
+_GENERIC_BOARD_WORDS = {
+    "about", "added", "after", "approved", "assigned", "before", "cancelled",
+    "changed", "checked", "closed", "completed", "created", "deleted",
+    "detail", "details", "entry", "entries", "event", "events", "failed",
+    "finished", "ingestion", "linked", "listed", "manage", "management",
+    "opened", "record", "records", "registered", "rejected", "removed",
+    "report", "reports", "request", "requests", "reviewed", "saved",
+    "search", "sheet", "started", "status", "submitted", "synced", "system",
+    "updated", "uploaded", "validated", "viewed",
+}
+
+
+def collect_domain_nouns(workspace_root: str | os.PathLike,
+                         exclude_project: str | None = None) -> list[str]:
+    """
+    Harvest distinctive vocabulary from every archived project board under
+    the workspace (<workspace>/<project>/specs/*.board.json). This is what
+    keeps the guard GENERATIVE: project #2's nouns join the registry the
+    moment its board exists, with nobody editing a list by hand.
+    """
+    root = pathlib.Path(workspace_root)
+    if not root.is_dir():
+        return []
+    nouns: set[str] = set()
+    for board_path in sorted(root.glob("*/specs/*.board.json")):
+        if exclude_project and board_path.parent.parent.name == exclude_project:
+            continue
+        try:
+            board = json.loads(board_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        chunks: list[str] = []
+        for e in board.get("business_events") or []:
+            chunks.append(e.get("name") or "")
+            chunks.append(e.get("bounded_context") or "")
+            chunks.append(((e.get("aggregate") or {}).get("label")) or "")
+        for w in re.findall(r"[A-Za-z]{5,}", " ".join(chunks)):
+            lw = w.lower()
+            if lw not in _GENERIC_BOARD_WORDS:
+                nouns.add(lw)
+    return sorted(nouns)
+
+
+_MD_FENCE = re.compile(r"^(```|~~~).*?^\1\s*$", re.MULTILINE | re.DOTALL)
+_MD_INLINE_CODE = re.compile(r"`[^`\n]+`")
+
+
+def _scan_prose(path: pathlib.Path, nouns: list[str]) -> list[str]:
+    """Scan one markdown/JSON file for distinctive domain nouns, ignoring
+    code spans and fences — a `projects/foo/repo` path is a pointer, not
+    prose an agent will imitate."""
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return []
+    if CASE_STUDY_MARKER in text:
+        return []
+    if path.suffix.lower() in (".md", ".markdown"):
+        text = _MD_FENCE.sub("", text)
+        text = _MD_INLINE_CODE.sub("", text)
+    errors = []
+    for i, line in enumerate(text.splitlines(), 1):
+        for n in nouns:
+            if mentions_noun(n, line):
+                errors.append(f"{path}:{i}: domain noun '{n}' in prose -> "
+                              f"{line.strip()[:90]}")
+                break
+    return errors
+
 
 def check_prompt_leak(factory_dir: str = "project_factory",
-                      nouns: list[str] | None = None) -> Result:
+                      nouns: list[str] | None = None,
+                      surfaces: list[str] | None = None) -> Result:
     """
     Domain facts belong in the IR; prompts hold only CONVENTIONS.
 
     While debugging project #1 you WILL be tempted to hard-code "containers have
     packing lists" into a prompt to fix a stubborn slice. Do that a few times and
     project #2 breaks mysteriously. Run this in CI and fail the build.
+
+    Two scan layers:
+      * Python source under factory_dir — full DOMAIN_NOUNS + EXEMPLAR_NOUNS,
+        quoted-string lines only (comments/docstrings never reach a model).
+      * `surfaces` (markdown runbooks / docs / JSON config) — distinctive
+        PROSE_NOUNS only, code spans stripped, files carrying
+        CASE_STUDY_MARKER exempt. These files anchor the orchestrating agent
+        the way prompts anchor the drafting agents.
     """
-    nouns = [n.lower() for n in (nouns or DOMAIN_NOUNS)]
+    nouns = [n.lower() for n in (nouns or (DOMAIN_NOUNS + EXEMPLAR_NOUNS))]
     errors: list[str] = []
     for path in pathlib.Path(factory_dir).rglob("*.py"):
         if path.name == "harness.py":       # this file legitimately lists them
@@ -437,6 +554,14 @@ def check_prompt_leak(factory_dir: str = "project_factory",
             low = stripped.lower()
             if any(n in low for n in nouns) and ('"' in line or "'" in line):
                 errors.append(f"{path}:{i}: domain noun in prompt/string -> {stripped[:90]}")
+
+    for surface in surfaces or []:
+        s = pathlib.Path(surface)
+        files = sorted(s.rglob("*.md")) + sorted(s.rglob("*.json")) \
+            if s.is_dir() else ([s] if s.is_file() else [])
+        for f in files:
+            errors.extend(_scan_prose(f, [n.lower() for n in PROSE_NOUNS]))
+
     return Result(ok=not errors, summary=f"{len(errors)} leak(s)", errors=errors)
 
 
@@ -466,10 +591,12 @@ def _doc_and_comment_lines(source: str) -> set[int]:
 
 
 if __name__ == "__main__":
-    r = check_prompt_leak()
+    import sys
+    r = check_prompt_leak(surfaces=PROMPT_SURFACES)
     print(r.summary)
     for e in r.errors:
         print(" -", e)
+    sys.exit(0 if r.ok else 1)
 
 
 # -----------------------------------------------------------------------------

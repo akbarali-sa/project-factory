@@ -33,11 +33,22 @@ import re
 import yaml
 
 from . import config as cfgmod
+from . import harness
 from .models import Usage, claude
 
 PLAN_FILENAME = "project-plan.json"
 
 _EXEMPLAR = pathlib.Path(__file__).parent / "exemplars" / "scenarios-exemplar.yaml"
+_STARTER_CONSTRAINTS = (pathlib.Path(__file__).parent / "exemplars"
+                        / "starter-constraints.yaml")
+
+
+def starter_constraints() -> dict:
+    """Canonical starter-kit truth block, parsed. Single source for both the
+    prompt injection and the validator's verbatim check — the exemplar no
+    longer carries it, so exemplar style and starter truth can evolve
+    independently."""
+    return yaml.safe_load(_STARTER_CONSTRAINTS.read_text())["starter_constraints"]
 
 
 class PlanError(RuntimeError):
@@ -274,6 +285,16 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
         events = [e for e in board.get("business_events", [])
                   if e["id"] in set(planned["event_ids"])]
     exemplar = _EXEMPLAR.read_text()
+    starter_block = yaml.safe_dump({"starter_constraints": starter_constraints()},
+                                   sort_keys=False, allow_unicode=True)
+    # Vocabulary of every OTHER project in the workspace: their nouns may not
+    # appear in this project's oracle unless this board also uses them.
+    try:
+        extra_nouns = harness.collect_domain_nouns(
+            project.dir.parent, exclude_project=project.dir.name)
+    except Exception:
+        extra_nouns = []
+    board_text = json.dumps(events) + json.dumps(planned)
 
     kind_brief = (
         "Author the ORACLE for the project's HORIZONTAL slice — the one that "
@@ -303,9 +324,17 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
         "This file is the single source of truth for correctness; "
         "implementers never see or edit it.\n\n"
         "Hold yourself to the standard of this exemplar (structure, precision, "
-        "explicit rejection paths, test-data strategy). Copy its FORM, never "
-        "its domain content:\n\n"
+        "explicit rejection paths, test-data strategy). Its domain is "
+        "deliberately FICTIONAL and its nouns are canaries: copy its FORM, "
+        "never its content — a draft containing exemplar vocabulary that is "
+        "not on this project's board fails validation. Its workflow shape "
+        "(a file-ingestion slice) is equally just an example; your shape "
+        "comes from the board.\n\n"
         f"```yaml\n{exemplar}\n```\n\n"
+        "Starter-kit constraints (truth about the template, NOT domain "
+        "content) — include this block VERBATIM as `starter_constraints` in "
+        "your YAML:\n\n"
+        f"```yaml\n{starter_block}\n```\n\n"
         f"Slice to author (from the approved project plan):\n"
         f"{json.dumps({k: planned[k] for k in ('id', 'name', 'wave', 'bounded_context', 'event_ids')}, indent=1)}\n\n"
         + (f"Events shipped by earlier waves — the screens to connect, NOT "
@@ -315,8 +344,9 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
         + "Requirements:\n"
         "  * slice.id / wave / bounded_context must match the plan exactly; "
         "approved_by/approved_at stay null.\n"
-        "  * Keep the exemplar's starter_constraints block VERBATIM — it is "
-        "starter-kit truth, not domain content.\n"
+        "  * Include the starter_constraints block given above VERBATIM.\n"
+        "  * Use ONLY vocabulary from this project's board and plan — never "
+        "the exemplar's, and never another project's.\n"
         "  * Every scenario: unique id (SC-/WEB-/E2E-), title, traces_to, "
         "given/when/then with concrete values and explicit HTTP status codes.\n"
         "  * Cover the happy path AND every rejection/validation path the "
@@ -346,7 +376,9 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
             attempt=attempt, usage=usage, budget_usd=budget_usd, log_path=log_path,
         )
         text = _strip_fences(out)
-        errors = validate_oracle(text, planned)
+        errors = validate_oracle(text, planned, board_text=board_text,
+                                 extra_nouns=extra_nouns,
+                                 require_starter=True)
         if not errors:
             header = (
                 "# =============================================================================\n"
@@ -369,9 +401,17 @@ def _strip_fences(out: str) -> str:
     return m.group(1) if m else out
 
 
-def validate_oracle(text: str, planned: dict) -> list[str]:
+def validate_oracle(text: str, planned: dict, *,
+                    board_text: str | None = None,
+                    extra_nouns: list[str] | None = None,
+                    require_starter: bool = False) -> list[str]:
     """Mechanical validation of a drafted oracle. Content review is the gate's
-    job; this catches everything a schema can catch."""
+    job; this catches everything a schema can catch.
+
+    With board_text, it also catches DOMAIN LEAKAGE — the one failure a
+    schema can't see: a draft that echoes the exemplar's fictional domain or
+    a past project's vocabulary instead of this board's. Any registered noun
+    appearing in the draft but not on the board is an error."""
     errors: list[str] = []
     try:
         data = yaml.safe_load(text)
@@ -415,4 +455,19 @@ def validate_oracle(text: str, planned: dict) -> list[str]:
                     continue
                 errors.append(f"{sid}: traces_to '{t}' is neither a slice "
                               "event nor a scenario/requirement id")
+
+    if require_starter and data.get("starter_constraints") != starter_constraints():
+        errors.append("starter_constraints missing or altered — include the "
+                      "block from the prompt VERBATIM")
+
+    if board_text is not None:
+        registry = (harness.DOMAIN_NOUNS + harness.EXEMPLAR_NOUNS
+                    + (extra_nouns or []))
+        for noun in registry:
+            if (harness.mentions_noun(noun, text)
+                    and not harness.mentions_noun(noun, board_text)):
+                errors.append(
+                    f"domain noun '{noun}' does not appear on this project's "
+                    "board — copied from the exemplar or a past project; "
+                    "rewrite using the board's own vocabulary")
     return errors

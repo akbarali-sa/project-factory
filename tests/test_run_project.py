@@ -622,18 +622,17 @@ class MergeToMainTests(unittest.TestCase):
 
 class PromptPortabilityTests(unittest.TestCase):
     """
-    The factory is generic; only the IR and run.json carry a domain. README and
-    the build plan both describe check_prompt_leak() as a CI gate — but this
-    repo has no CI, so for its whole life the guard was wired to nothing. It
-    caught three real leaks the moment it was finally run, all introduced the
+    The factory is generic; only the IR and run.json carry a domain. The guard
+    caught three real leaks the moment it was first run, all introduced the
     same day by someone (me) writing a worked example straight from the last
-    project into a prompt.
-
-    Running it here is the cheapest place that actually executes.
+    project into a prompt. It now also runs in CI (.github/workflows) and
+    covers the prose surfaces agents read for orientation — the biggest leak
+    ever found was in a YAML exemplar, not a .py file.
     """
 
-    def test_no_domain_nouns_in_prompts(self) -> None:
-        r = harness.check_prompt_leak("project_factory")
+    def test_no_domain_nouns_in_prompts_or_prose(self) -> None:
+        r = harness.check_prompt_leak("project_factory",
+                                      surfaces=harness.PROMPT_SURFACES)
         self.assertTrue(r.ok, "domain vocabulary leaked into factory code:\n  "
                               + "\n  ".join(r.errors))
 
@@ -657,6 +656,106 @@ class PromptPortabilityTests(unittest.TestCase):
                 '# the barcode project proved this: a warehouse has "packing lists"\n'
                 'X = 1\n')
             self.assertTrue(harness.check_prompt_leak(td).ok)
+
+    def test_prose_surface_catches_a_noun(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            md = pathlib.Path(td, "runbook.md")
+            md.write_text("Remember that every warehouse gets a packing list.\n")
+            r = harness.check_prompt_leak(td, surfaces=[td])
+            self.assertFalse(r.ok)
+            self.assertTrue(any("runbook.md" in e for e in r.errors), r.errors)
+
+    def test_prose_code_spans_are_pointers_not_leaks(self) -> None:
+        """A `projects/<name>/repo` path in a code span is a pointer an agent
+        follows, not prose it imitates — flagging it would force runbooks to
+        lie about where things are."""
+        with tempfile.TemporaryDirectory() as td:
+            pathlib.Path(td, "runbook.md").write_text(
+                "Reference fixes live in `projects/barcode-mvp/repo`.\n"
+                "```\ncd projects/barcode-mvp/repo && git log\n```\n")
+            self.assertTrue(harness.check_prompt_leak(td, surfaces=[td]).ok)
+
+    def test_case_study_marker_exempts_a_file(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            pathlib.Path(td, "history.md").write_text(
+                harness.CASE_STUDY_MARKER
+                + "\nProject #1 sorted warehouse containers by barcode.\n")
+            self.assertTrue(harness.check_prompt_leak(td, surfaces=[td]).ok)
+
+    def test_exemplar_is_fictional_and_carries_its_canaries(self) -> None:
+        """The bundled exemplar must never re-acquire a past project's
+        vocabulary, and must keep the canary nouns the oracle leak check
+        depends on — lose those and copied exemplar content becomes
+        undetectable again."""
+        text = (pathlib.Path("project_factory") / "exemplars"
+                / "scenarios-exemplar.yaml").read_text()
+        for noun in harness.DOMAIN_NOUNS:
+            self.assertFalse(harness.mentions_noun(noun, text),
+                             f"past-project noun '{noun}' is back in the exemplar")
+        self.assertTrue(any(harness.mentions_noun(n, text)
+                            for n in harness.EXEMPLAR_NOUNS))
+
+
+class OracleLeakTests(unittest.TestCase):
+    """
+    The output-side half of portability: validate_oracle must reject a draft
+    that echoes vocabulary from the exemplar or another project when this
+    project's board doesn't use it — the schema checks can't see that, and
+    Gate A skims.
+    """
+
+    BOARD_TEXT = json.dumps(EVENTS)  # has container/packing list/barcode/scan
+
+    def test_board_vocabulary_is_allowed(self) -> None:
+        # _oracle_yaml speaks project #1's language; its board does too.
+        errors = planner.validate_oracle(_oracle_yaml(), PLANNED,
+                                         board_text=self.BOARD_TEXT)
+        self.assertEqual(errors, [])
+
+    def test_exemplar_canary_is_rejected(self) -> None:
+        doc = json.loads(_oracle_yaml())
+        doc["scenarios"][0]["given"] = ["A folio exists with 2 specimen entries"]
+        errors = planner.validate_oracle(json.dumps(doc), PLANNED,
+                                         board_text=self.BOARD_TEXT)
+        self.assertTrue(any("folio" in e for e in errors), errors)
+        self.assertTrue(any("specimen" in e for e in errors), errors)
+
+    def test_other_projects_nouns_are_rejected(self) -> None:
+        doc = json.loads(_oracle_yaml())
+        doc["scenarios"][0]["given"] = ["An invoice ledger already exists"]
+        errors = planner.validate_oracle(
+            json.dumps(doc), PLANNED, board_text=self.BOARD_TEXT,
+            extra_nouns=["invoice ledger"])
+        self.assertTrue(any("invoice ledger" in e for e in errors), errors)
+
+    def test_starter_block_is_required_verbatim(self) -> None:
+        errors = planner.validate_oracle(_oracle_yaml(), PLANNED,
+                                         require_starter=True)
+        self.assertTrue(any("starter_constraints" in e for e in errors), errors)
+
+        doc = json.loads(_oracle_yaml())
+        doc["starter_constraints"] = planner.starter_constraints()
+        self.assertEqual(planner.validate_oracle(json.dumps(doc), PLANNED,
+                                                 require_starter=True), [])
+
+    def test_collect_domain_nouns_harvests_boards(self) -> None:
+        board = {"business_events": [
+            {"name": "Invoice ledger reconciled",
+             "bounded_context": "Billing",
+             "aggregate": {"label": "InvoiceLedger"}},
+        ]}
+        with tempfile.TemporaryDirectory() as td:
+            specs = pathlib.Path(td, "projA", "specs")
+            specs.mkdir(parents=True)
+            (specs / "a.board.json").write_text(json.dumps(board))
+            nouns = harness.collect_domain_nouns(td)
+            self.assertIn("invoice", nouns)
+            self.assertIn("reconciled", nouns)
+            self.assertNotIn("event", nouns)
+            # the project being drafted is excluded — its own vocabulary is
+            # exactly what its oracle SHOULD use
+            self.assertEqual(
+                harness.collect_domain_nouns(td, exclude_project="projA"), [])
 
 
 class RateLimitDetection(unittest.TestCase):

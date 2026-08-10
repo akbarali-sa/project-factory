@@ -99,7 +99,8 @@ built. Check before approving:
 
 ## Budget expectations (calibration from real runs)
 
-The barcode slice cost $25.74 solo (api 1 attempt, web 1, e2e 3). Planning
+Project #1's first slice (`barcode-mvp`) cost $25.74 solo (api 1 attempt,
+web 1, e2e 3) — a single datapoint, not a planning default. Planning
 ~$1, an oracle draft ~$1–3. A 3–4 slice project therefore fits a $100 budget
 only if most slices pass early; raise `project_budget_usd` in run.json
 before starting if the board is bigger, not mid-run. When the breaker trips

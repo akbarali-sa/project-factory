@@ -1,0 +1,27 @@
+# =============================================================================
+# STARTER-KIT TRUTH — not domain content, not exemplar style.
+#
+# This block is injected VERBATIM into every drafted oracle (author_oracle),
+# and validate_oracle rejects a draft whose starter_constraints differ from
+# this file. Update HERE when the starter fork changes; never edit the block
+# inside an individual oracle.
+# =============================================================================
+starter_constraints:
+  ids: >
+    Primary keys are `String @id @default(cuid())`. The API serialises them as
+    `_id` on the wire (src/common/serializers/api.serializer.ts) — assert on
+    `_id`, not `id`, in API and E2E tests.
+  auth: >
+    Email-only login, no passwords. JWT in an httpOnly cookie on web, guarded in
+    apps/web/src/proxy.ts. Seeded users: john.doe@example.com,
+    jane.doe@example.com, mark.s@example.com.
+  seeded_users: [john.doe@example.com, jane.doe@example.com, mark.s@example.com]
+  conventions: >
+    Explicit join tables over implicit m2m; Cascade on structural parents,
+    Restrict on user references, SetNull on optional assignments; no unique
+    constraint on ordering columns; wrap prisma.x.update() in nullIfMissing() so
+    a missing row 404s instead of 500s; multi-statement writes inside
+    $transaction using tx.* — see apps/api/prisma/schema.prisma and MIGRATION.md.
+  schema_rule: >
+    APPEND to apps/api/prisma/schema.prisma. Never overwrite it — it holds the
+    generator, datasource and the `User` model auth depends on.

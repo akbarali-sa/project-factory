@@ -1,4 +1,11 @@
+<!-- factory:case-study -->
 # Repo layout, seeding, Spec Kit decision, and the first-slice runbook
+
+> **Historical case study — project #1 (barcode sorting).** The layout and
+> seeding decisions here are factory-generic, but every worked example uses
+> project #1's domain. Do not treat its fixtures, aggregates, or scenarios
+> as templates for a new project — a new project's vocabulary comes from
+> its own board, nowhere else.
 
 Updated for **`akbarali-sa/turborepo-starter-kit @ starter-minimal`** as the default starter for every project.
 

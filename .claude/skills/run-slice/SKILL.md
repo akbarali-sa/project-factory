@@ -296,8 +296,10 @@ Expect blind first attempts and budget accordingly until the allowed-tools
 fix lands in `models.py`'s `claude()`.
 
 **Starter-kit traps that break e2e in every generated project**
-(`turborepo-starter-kit@starter-minimal`, reference fixes in the barcode
-repo, commit `cfe3935`):
+(`turborepo-starter-kit@starter-minimal`; reference fixes live in project
+#1's generated repo, `projects/barcode-mvp/repo` commit `cfe3935`, until
+they are upstreamed to the starter fork — see the vault note *Turborepo
+starter-minimal known traps*):
 1. `Login.test` compares the raw `{appName}` i18n template against the
    rendered heading — always fails; compare the resolved string.
 2. The login form's demo prefill (`mark.s@example.com`, a WORKER) wins over

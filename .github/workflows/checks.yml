@@ -1,0 +1,23 @@
+# Factory checks — the harness docstring promises "run this in CI and fail
+# the build"; this workflow is what makes that sentence true.
+name: factory checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Unit tests (includes the portability gate)
+        run: python -m unittest discover -s tests -v
+      - name: Prompt-leak gate (source + prose surfaces)
+        run: python -m project_factory.harness
