@@ -555,8 +555,24 @@ class ReasoningAgentSandboxTests(unittest.TestCase):
     def test_write_scope_agent_keeps_its_tools(self) -> None:
         cmd = self._cmd_for(write_scope=["apps/api/**"])
         self.assertIn("acceptEdits", cmd)
-        self.assertNotIn("--append-system-prompt", cmd)
         self.assertIn("Write(apps/api/**)", cmd)
+
+    def test_write_scope_agent_is_told_not_to_take_notes(self) -> None:
+        """acceptEdits auto-accepts edits beyond the allowlist, so the scope
+        is a request, not a wall — the Implementer burned four turns of a
+        30-minute budget on ~/.claude memory files and was killed mid-module."""
+        cmd = self._cmd_for(write_scope=["apps/api/**"])
+        appended = cmd[cmd.index("--append-system-prompt") + 1]
+        self.assertIn("memory files", appended)
+        self.assertIn("apps/api/**", appended)
+
+    def test_bulk_writers_get_a_longer_ceiling(self) -> None:
+        from project_factory import models
+        self.assertGreater(models.AGENT_TIMEOUT["implementer"],
+                           models.DEFAULT_TIMEOUT)
+        self.assertGreater(models.AGENT_TIMEOUT["test_author"],
+                           models.DEFAULT_TIMEOUT)
+        self.assertNotIn("architect", models.AGENT_TIMEOUT)
 
 
 class AssumptionsValidationTests(unittest.TestCase):

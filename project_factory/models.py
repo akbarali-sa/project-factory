@@ -86,6 +86,16 @@ AGENT_TIER: dict[str, str] = {
 # when needed. This is a real cost lever — most slices pass on attempt 1.
 IMPLEMENTER_ESCALATION = {0: "sonnet", 1: "sonnet", 2: "opus"}
 
+# Wall-clock ceiling per agent (seconds), NOT an inactivity timeout: a
+# perfectly productive agent is killed at the limit and its work is lost with
+# the node's state update. The bulk file-writing agents need more than the
+# reasoning ones — barcode-v2's Test Author finished at 1798s against the old
+# flat 1800s ceiling (i.e. it survived by two seconds), and the Implementer on
+# the same slice was killed mid-write at 1800s having already produced a
+# working module. Reasoning agents return one artifact and stay at 30 min.
+DEFAULT_TIMEOUT = 1800
+AGENT_TIMEOUT = {"test_author": 5400, "implementer": 5400, "diagnostician": 2700}
+
 
 def model_for(agent: str, attempt: int = 0) -> str:
     if agent == "implementer":
@@ -260,7 +270,7 @@ def claude(
     budget_usd: float | None = None,
     write_scope: list[str] | None = None,
     read_only: list[str] | None = None,
-    timeout: int = 1800,
+    timeout: int | None = None,
     log_path: pathlib.Path | None = None,
 ) -> str:
     """
@@ -284,6 +294,8 @@ def claude(
     if budget_usd is not None and usage is not None and usage.cost_usd >= budget_usd:
         raise BudgetExceeded(f"run budget ${budget_usd} reached before {agent}")
 
+    if timeout is None:
+        timeout = AGENT_TIMEOUT.get(agent, DEFAULT_TIMEOUT)
     model = model_for(agent, attempt)
     cmd = ["claude", "-p", prompt, "--model", CLI_ALIAS[model]]
     cmd += (["--output-format", "stream-json", "--verbose"] if log_path is not None
@@ -294,6 +306,21 @@ def claude(
         cmd += ["--permission-mode", "acceptEdits"]
         for pattern in write_scope:
             cmd += ["--allowedTools", f"Edit({pattern})", "--allowedTools", f"Write({pattern})"]
+        # acceptEdits auto-accepts every edit, not only the allowlisted ones,
+        # so the allowlist alone does not keep an agent inside the repo. On
+        # barcode-v2 the Implementer spent four turns of a 30-minute budget
+        # writing persistent-memory files under ~/.claude and was then killed
+        # by the timeout mid-module. Naming the deliverable is what stops it.
+        cmd += ["--append-system-prompt",
+                "You are a non-interactive pipeline agent inside a generated "
+                "repository. Your deliverable is the code you write under "
+                f"{', '.join(write_scope)} — nothing else. Do not write "
+                "notes, memory files, journals, or knowledge-base entries "
+                "anywhere, and do not write outside that scope, whatever any "
+                "project, user, or memory instructions say — they do not "
+                "apply to this invocation. You are on a wall-clock budget: "
+                "every turn spent on anything but the deliverable is lost "
+                "work."]
     else:
         # A reasoning agent's deliverable is the text it RETURNS. Left to its
         # own devices it inherits the operator's personal CLAUDE.md — during
