@@ -428,6 +428,17 @@ def write_tests(state: S) -> dict:
         # project run, essentially EVERY non-infrastructure e2e failure was one
         # of these five, and each one burned a full 3-attempt diagnose/fix loop
         # on a product that was behaving correctly the whole time.
+        # Paid for on barcode-v2's scanning slice: a fixture that threw on its
+        # second call sent the Implementer into the test files to fix it, which
+        # check_write_scope correctly refused — costing the node.
+        "IDEMPOTENT FIXTURES — a seed helper must survive being called twice "
+        "with the same business key. Scenarios in one file share constants, "
+        "the suite re-runs after every implement attempt, and unique columns "
+        "do not forgive a second insert. Delete-then-create inside the "
+        "transaction, or derive a per-scenario key. A fixture that throws on "
+        "its second call reads as a product failure and sends the Implementer "
+        "into YOUR files to fix it — which the oracle guard rejects, losing "
+        "the whole attempt.\n\n"
         "SHARED HELPERS — put every selector helper (live region, form fields, "
         "sign-in, seeding) in ONE module at the suite root, e.g. "
         "apps/web/__tests__/e2e/helpers/, and import it from each spec. Do NOT "
