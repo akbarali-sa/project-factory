@@ -14,6 +14,7 @@ import json
 import pathlib
 import tempfile
 import unittest
+import unittest.mock
 
 from project_factory import config as cfgmod
 from project_factory import planner
@@ -649,6 +650,41 @@ class ProvisionalScenarioGuardTests(unittest.TestCase):
             "provisional_scenarios": [],
         })
         self.assertNotIn("BLOCKED SCENARIOS", prompt)
+
+
+class RepoDevServerSweepTests(unittest.TestCase):
+    """Next's "Another next dev server is already running" guard is REPO-scoped,
+    so a dev server left on a DIFFERENT port still blocks the launch and the
+    port sweep cannot see it. barcode-v2 lost a launch_stack to a hand-started
+    server five hours old sitting on the previous port allocation."""
+
+    def test_kills_repo_owned_server_on_any_port(self) -> None:
+        from project_factory import infra
+        killed: list[int] = []
+        with unittest.mock.patch.object(
+                infra.subprocess, "run",
+                return_value=type("P", (), {"stdout": "111 222\n"})()), \
+             unittest.mock.patch.object(
+                infra, "_owned_by_repo", side_effect=lambda pid, repo: pid == 111), \
+             unittest.mock.patch.object(
+                infra.os, "kill", side_effect=lambda pid, sig: killed.append(pid)), \
+             unittest.mock.patch.object(infra.time, "sleep"):
+            out = infra._kill_repo_dev_servers("/repo")
+        self.assertEqual(out, [111])   # 222 is a foreign dev server
+        self.assertEqual(killed, [111])
+
+    def test_keep_set_is_respected(self) -> None:
+        from project_factory import infra
+        with unittest.mock.patch.object(
+                infra.subprocess, "run",
+                return_value=type("P", (), {"stdout": "111\n"})()), \
+             unittest.mock.patch.object(
+                infra, "_owned_by_repo", return_value=True), \
+             unittest.mock.patch.object(infra.os, "kill") as k, \
+             unittest.mock.patch.object(infra.time, "sleep"):
+            out = infra._kill_repo_dev_servers("/repo", keep={111})
+        self.assertEqual(out, [])
+        k.assert_not_called()
 
 
 class WriteEnvCorsTests(unittest.TestCase):

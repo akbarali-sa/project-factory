@@ -384,6 +384,9 @@ def launch_stack(repo: str, stack: Stack) -> str:
     # before the current slice existed and every failure looks like a product
     # bug. Ownership-checked, exactly like ensure_stack.
     _free_project_ports(repo, stack)
+    # …and any repo-owned dev server on ANOTHER port, which no port sweep can
+    # see but which Next's repo-scoped guard will still refuse to start beside.
+    _kill_repo_dev_servers(repo)
     _processes["api"] = _spawn_app("api", ["pnpm", "--filter=@repo/api", "dev"],
                                    repo, env)
     if not _wait_http(f"{stack.api_url}/health") and not _wait_http(stack.api_url):
@@ -462,6 +465,36 @@ def _pids_listening(port: int) -> list[int]:
     p = subprocess.run(["lsof", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
                        capture_output=True, text=True)
     return [int(x) for x in p.stdout.split()]
+
+
+def _kill_repo_dev_servers(repo: str, keep: set[int] | None = None) -> list[int]:
+    """
+    Kill every `next dev` / next-server process whose cwd is inside this repo,
+    whatever port it holds.
+
+    Port sweeping is not enough: Next's own "Another next dev server is already
+    running" guard is REPO-scoped, not port-scoped. A dev server left behind on
+    a different port (a hand-started stack from a debugging session, a previous
+    run whose port allocation differed) makes the new `next dev` exit 1 no
+    matter how clean its own port is, and the failure surfaces as the very
+    generic "web never became healthy". Ownership is still verified against the
+    repo, so a foreign dev server is never touched.
+    """
+    killed: list[int] = []
+    p = subprocess.run(["pgrep", "-f", "next(-server| dev)"],
+                       capture_output=True, text=True)
+    for token in p.stdout.split():
+        pid = int(token)
+        if (keep and pid in keep) or not _owned_by_repo(pid, repo):
+            continue
+        try:
+            os.kill(pid, 9)
+            killed.append(pid)
+        except ProcessLookupError:
+            pass
+    if killed:
+        time.sleep(2)
+    return killed
 
 
 def _free_project_ports(repo: str, stack: Stack) -> list[int]:
