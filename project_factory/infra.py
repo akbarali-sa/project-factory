@@ -240,14 +240,29 @@ def write_env(repo: str, stack: Stack, jwt_secret: str) -> None:
         # spawns a second API that binds the wrong (possibly taken) port.
         "PORT": str(stack.api_port),
         "DATABASE_URL": stack.database_url,
+        # The API's CORS allowlist is built from NEXT_PUBLIC_WEB_URL
+        # (apps/api/src/main.ts). Left at the template's localhost:3000 while
+        # sticky_ports put the web app on another port, EVERY browser fetch
+        # is rejected by CORS — which surfaces in Playwright as
+        # `net::ERR_FAILED` console noise and a wall of failing e2e tests that
+        # look exactly like product bugs. Project #1 happened to land on 3000
+        # and hid this; barcode-v2 landed on 3005 and lost three e2e attempts
+        # plus two Opus diagnosticians to it.
+        "NEXT_PUBLIC_WEB_URL": stack.web_url,
+        "NEXT_PUBLIC_API_URL": stack.api_url,
     }
     kept = [l for l in lines if l.split("=")[0].strip() not in over and l.strip()]
     api_env.write_text("\n".join(kept + [f"{k}={v}" for k, v in over.items()]) + "\n")
 
     web_env = pathlib.Path(repo) / "apps/web/.env"
+    wover = {
+        "NEXT_PUBLIC_API_URL": stack.api_url,
+        "NEXT_PUBLIC_WEB_URL": stack.web_url,
+    }
     wl = web_env.read_text().splitlines() if web_env.exists() else []
-    wkept = [l for l in wl if not l.startswith("NEXT_PUBLIC_API_URL") and l.strip()]
-    web_env.write_text("\n".join(wkept + [f"NEXT_PUBLIC_API_URL={stack.api_url}"]) + "\n")
+    wkept = [l for l in wl if l.split("=")[0].strip() not in wover and l.strip()]
+    web_env.write_text(
+        "\n".join(wkept + [f"{k}={v}" for k, v in wover.items()]) + "\n")
 
 
 def db_up(repo: str, stack: Stack, log_path: pathlib.Path | None = None) -> None:

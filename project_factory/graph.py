@@ -482,6 +482,18 @@ def _implement(state: S, phase: str, scope: list[str], instruction: str) -> dict
         "The tests are the specification and are READ-ONLY. Never edit, delete "
         "or skip a test. Follow AGENTS.md and the repo skills. Match the "
         "existing reference module's structure.\n\n"
+        # Paid for on barcode-v2: the Implementer wrote the single most
+        # idiomatic TS Result type, the pre-commit typecheck rejected it, and
+        # two Opus diagnosticians ($10.52) reasoned about "type errors" that
+        # were a compiler-config artifact, not a defect in the code.
+        "TYPESCRIPT — apps/api/tsconfig.json sets `strictNullChecks: false`, "
+        "under which a BOOLEAN-literal discriminated union does not narrow: "
+        "with `{ ok: true; value: T } | { ok: false; error: E }`, code inside "
+        "`if (!r.ok)` still sees the `ok: true` branch and every `r.error` "
+        "access fails TS2339. Use a STRING discriminant — "
+        '`{ status: "ok"; ... } | { status: "error"; error: E }` tested with '
+        '`if (r.status === "error")`. The pre-commit hook type-checks, so '
+        "getting this wrong loses the whole node's work at its final step.\n\n"
         "Do NOT change how the app is RUN — the `dev`/`start` scripts, the "
         "Playwright webServer config, or any .env. The harness allocates ports "
         "and starts the stack; pinning a port or altering the boot sequence "

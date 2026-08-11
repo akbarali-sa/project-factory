@@ -552,6 +552,41 @@ class ExpectedStatusCodeTests(unittest.TestCase):
         self.assertEqual(_expected_status_codes(text), {"503", "404"})
 
 
+class WriteEnvCorsTests(unittest.TestCase):
+    """The API builds its CORS allowlist from NEXT_PUBLIC_WEB_URL. Left at the
+    template's :3000 while sticky_ports moved the web app elsewhere, every
+    browser fetch is CORS-rejected and the e2e suite fails in a way that looks
+    exactly like a product bug (barcode-v2: 3 e2e attempts + 2 Opus
+    diagnosticians)."""
+
+    def test_both_envs_carry_the_allocated_urls(self) -> None:
+        from project_factory import infra
+        with tempfile.TemporaryDirectory() as td:
+            repo = pathlib.Path(td)
+            for app in ("api", "web"):
+                d = repo / "apps" / app
+                d.mkdir(parents=True)
+                (d / "env.example").write_text(
+                    'NEXT_PUBLIC_WEB_URL="http://localhost:3000"\n'
+                    'NEXT_PUBLIC_API_URL="http://localhost:3001"\n'
+                    "PORT=3001\nKEEP_ME=yes\n")
+            stack = infra.Stack(project_slug="x", api_port=3004, web_port=3005,
+                                db_name="x", db_host="localhost", db_port=5432,
+                                db_user="u", db_password="p")
+            infra.write_env(str(repo), stack, "secret")
+
+            api_env = (repo / "apps/api/.env").read_text()
+            web_env = (repo / "apps/web/.env").read_text()
+            for env in (api_env, web_env):
+                self.assertIn("NEXT_PUBLIC_WEB_URL=http://localhost:3005", env)
+                self.assertIn("NEXT_PUBLIC_API_URL=http://localhost:3004", env)
+                self.assertNotIn("localhost:3000", env)
+                self.assertNotIn("localhost:3001", env)
+            # template keys we don't own are preserved
+            self.assertIn("KEEP_ME=yes", api_env)
+            self.assertIn("PORT=3004", api_env)
+
+
 class ReasoningAgentSandboxTests(unittest.TestCase):
     """A reasoning agent's deliverable is the text it returns. During the
     barcode-v2 run the planner-layer agents inherited the operator's personal

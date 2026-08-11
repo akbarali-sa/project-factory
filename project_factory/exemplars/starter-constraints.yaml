@@ -22,6 +22,16 @@ starter_constraints:
     constraint on ordering columns; wrap prisma.x.update() in nullIfMissing() so
     a missing row 404s instead of 500s; multi-statement writes inside
     $transaction using tx.* — see apps/api/prisma/schema.prisma and MIGRATION.md.
+  typescript: >
+    apps/api/tsconfig.json sets `strictNullChecks: false`, and under it a
+    BOOLEAN-literal discriminated union does not narrow: given
+    `{ ok: true; value: T } | { ok: false; error: E }`, TypeScript inside
+    `if (!r.ok)` still resolves `r` to the `ok: true` branch and every
+    `r.error` access fails with TS2339. Use a STRING discriminant instead —
+    `{ status: "ok"; value: T } | { status: "error"; error: E }`, tested with
+    `if (r.status === "error")` — which narrows correctly under this config.
+    The pre-commit hook type-checks, so a boolean-discriminated Result type
+    blocks the commit at the end of the node, after all the work is done.
   schema_rule: >
     APPEND to apps/api/prisma/schema.prisma. Never overwrite it — it holds the
     generator, datasource and the `User` model auth depends on.
