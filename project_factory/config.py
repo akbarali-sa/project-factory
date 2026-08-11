@@ -41,7 +41,7 @@ import os
 import pathlib
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 
@@ -151,6 +151,64 @@ def normalize_board(raw: dict) -> dict:
 
 def load_board(path: pathlib.Path | str) -> dict:
     return normalize_board(json.loads(pathlib.Path(path).read_text()))
+
+
+class InputFolder(NamedTuple):
+    """What a co-architect's engagement folder contributes to specs/."""
+    board: pathlib.Path
+    backlog: pathlib.Path | None
+    docs: list[pathlib.Path]
+
+
+def resolve_input_folder(src: pathlib.Path) -> InputFolder:
+    """
+    Pick the board, the reviewed backlog and the prose docs out of a delivered
+    engagement folder (board tree + backlog.json + stories/ + rationale
+    markdown).
+
+    Board selection is deliberately strict, and prefers a TREE export: a tree
+    already contains its root and every subprocess board, so a folder that
+    also ships those as separate files must not produce three candidates —
+    but a folder with two genuinely different boards is ambiguous and fails
+    loudly rather than picking one.
+    """
+    jsons = [p for p in sorted(src.glob("*.json")) if p.name != "backlog.json"]
+    trees, flats = [], []
+    for p in jsons:
+        try:
+            obj = json.loads(p.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if isinstance(obj.get("subprocess_boards"), list) and "root" in obj:
+            trees.append(p)
+        elif isinstance(obj.get("business_events"), list) and obj.get("name"):
+            flats.append(p)
+
+    if trees:
+        candidates, kind = trees, "board tree"
+    else:
+        # Sub-boards carry parent_process_id and are part of a root, not
+        # boards in their own right; a folder shipping root + sub without a
+        # tree still has exactly one real board.
+        roots = [p for p in flats
+                 if not json.loads(p.read_text()).get("parent_process_id")]
+        candidates, kind = (roots or flats), "board"
+    if not candidates:
+        raise ConfigError(
+            f"no board JSON in {src}\n"
+            f"  expected a board tree ({{root, subprocess_boards}}) or a board "
+            f"with a non-empty 'business_events' list")
+    if len(candidates) > 1:
+        raise ConfigError(
+            f"{len(candidates)} {kind} files in {src} — exactly one expected:\n  "
+            + "\n  ".join(p.name for p in candidates)
+            + "\n  pass the file directly instead of the folder to choose one")
+
+    backlog = src / "backlog.json"
+    docs = [p for p in sorted(src.rglob("*.md")) if p.is_file()]
+    return InputFolder(candidates[0], backlog if backlog.exists() else None, docs)
 
 
 def event_in_scope(e: dict) -> bool:
@@ -521,8 +579,29 @@ def scaffold(slug: str, board: str | None, workspace: str | None = None,
         src = pathlib.Path(board).expanduser().resolve()
         if not src.exists():
             raise ConfigError(f"board not found: {src}")
-        name = src.name if src.name.endswith(".board.json") else f"{slug}.board.json"
-        (pdir / "specs" / name).write_bytes(src.read_bytes())
+        if src.is_dir():
+            # A delivered engagement FOLDER: board tree + the reviewed
+            # backlog + its prose rationale. The backlog is what makes the
+            # plan deterministic, so copying only the board would silently
+            # fall back to agent planning — the exact regression this branch
+            # exists to prevent.
+            found = resolve_input_folder(src)
+            (pdir / "specs" / f"{slug}.board.json").write_bytes(
+                found.board.read_bytes())
+            if found.backlog:
+                (pdir / "specs" / "backlog.json").write_bytes(
+                    found.backlog.read_bytes())
+            # Prose is provenance for humans reviewing the plan (what is
+            # deliberately unpriced, and why). Kept out of specs/ proper so
+            # discover()'s board/scenario globs never see it.
+            for doc in found.docs:
+                dest = pdir / "specs" / "reference" / doc.relative_to(src)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(doc.read_bytes())
+        else:
+            name = (src.name if src.name.endswith(".board.json")
+                    else f"{slug}.board.json")
+            (pdir / "specs" / name).write_bytes(src.read_bytes())
 
     if project_mode:
         # Written empty-but-present so discover() accepts the project before

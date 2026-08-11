@@ -841,7 +841,11 @@ def main(argv: list[str] | None = None) -> int:
 
     n = sub.add_parser("new", help="scaffold a project directory")
     n.add_argument("slug")
-    n.add_argument("--board", help="path to the presales *.board.json")
+    n.add_argument("--board",
+                   help="path to the presales *.board.json (a board tree "
+                        "export works too), or to a whole engagement FOLDER: "
+                        "its board, backlog.json and prose are all taken in, "
+                        "and a backlog makes planning deterministic")
     n.add_argument("--slice-name", default="slice-001")
     n.add_argument("--project", action="store_true",
                    help="board-only project for run-project: no placeholder "

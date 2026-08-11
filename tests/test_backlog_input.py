@@ -143,6 +143,84 @@ def _project(td: str) -> cfgmod.Project:
     return cfgmod.discover("widget", td)
 
 
+class InputFolderTests(unittest.TestCase):
+    """Scaffolding from a delivered engagement FOLDER. Copying only the board
+    silently drops the reviewed backlog, which silently drops deterministic
+    planning — the regression that matters here is a quiet one."""
+
+    def _folder(self, td: str, *, extra_boards: bool = False) -> pathlib.Path:
+        src = pathlib.Path(td) / "delivery"
+        (src / "stories").mkdir(parents=True)
+        (src / "board-tree.json").write_text(json.dumps(_tree()))
+        (src / "backlog.json").write_text(json.dumps(_backlog()))
+        (src / "README.md").write_text("# what is priced\n")
+        (src / "stories" / "01-ingestion.md").write_text("# ING-1\n")
+        if extra_boards:
+            # A folder that also ships the tree's own parts must NOT read as
+            # three boards — the tree already contains them.
+            (src / "root.json").write_text(json.dumps(_tree()["root"]))
+            (src / "sub.json").write_text(
+                json.dumps(_tree()["subprocess_boards"][0]))
+        return src
+
+    def test_resolves_board_backlog_and_docs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            found = cfgmod.resolve_input_folder(self._folder(td))
+            self.assertEqual(found.board.name, "board-tree.json")
+            self.assertEqual(found.backlog.name, "backlog.json")
+            self.assertEqual(sorted(p.name for p in found.docs),
+                             ["01-ingestion.md", "README.md"])
+
+    def test_tree_wins_over_its_own_parts(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            found = cfgmod.resolve_input_folder(
+                self._folder(td, extra_boards=True))
+            self.assertEqual(found.board.name, "board-tree.json")
+
+    def test_two_real_boards_is_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = self._folder(td)
+            (src / "other-tree.json").write_text(json.dumps(_tree()))
+            with self.assertRaises(cfgmod.ConfigError) as ctx:
+                cfgmod.resolve_input_folder(src)
+            self.assertIn("exactly one expected", str(ctx.exception))
+
+    def test_folder_with_no_board_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = pathlib.Path(td) / "empty"
+            src.mkdir()
+            (src / "backlog.json").write_text("{}")
+            with self.assertRaises(cfgmod.ConfigError):
+                cfgmod.resolve_input_folder(src)
+
+    def test_scaffold_from_folder_enables_deterministic_planning(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = self._folder(td)
+            ws = pathlib.Path(td) / "ws"
+            project = cfgmod.scaffold("widget", str(src), str(ws),
+                                      project_mode=True)
+            self.assertEqual(project.board_path.name, "widget.board.json")
+            self.assertIsNotNone(project.backlog_path)
+            # prose kept for provenance, but OUT of the globs discover() uses
+            self.assertTrue((project.dir / "specs" / "reference"
+                             / "stories" / "01-ingestion.md").exists())
+            self.assertEqual(
+                sorted(p.name for p in (project.dir / "specs").glob("*.json")),
+                ["backlog.json", "project-plan.json", "widget.board.json"])
+            # end to end: the plan converts without an agent
+            plan = planner.plan_slices(project)
+            self.assertIn("deterministic converter", plan["source"])
+
+    def test_scaffold_from_single_file_still_works(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = self._folder(td) / "board-tree.json"
+            ws = pathlib.Path(td) / "ws"
+            project = cfgmod.scaffold("widget", str(src), str(ws),
+                                      project_mode=True)
+            self.assertEqual(project.board_path.name, "widget.board.json")
+            self.assertIsNone(project.backlog_path)
+
+
 class NormalizeBoardTests(unittest.TestCase):
     def test_flat_board_passes_through(self) -> None:
         flat = {"name": "X", "business_events": [{"id": "be_a"}]}

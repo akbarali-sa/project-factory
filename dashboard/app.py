@@ -499,16 +499,35 @@ def _validate_board(obj: Any) -> dict:
     return obj
 
 
+def _input_folder(body: dict) -> pathlib.Path | None:
+    """The engagement FOLDER a request points at, if it points at one."""
+    raw = ((body or {}).get("board_path") or "").strip()
+    if not raw:
+        return None
+    p = pathlib.Path(raw).expanduser()
+    return p if p.is_dir() else None
+
+
 def _load_board_from_body(body: dict) -> tuple[dict | None, str | None]:
     """(board_obj, preferred_filename) from board_path OR board_json in the
     request — or (None, None) when neither was provided (allowed only when
-    reusing a project that already has a board)."""
+    reusing a project that already has a board).
+
+    board_path may be a FOLDER: a delivered engagement folder (board tree +
+    backlog.json + prose). The board is resolved out of it for preview here;
+    scaffold() is what copies the folder's other artifacts."""
     board_path = ((body or {}).get("board_path") or "").strip() or None
     board_json = (body or {}).get("board_json") or None
     if board_path:
         src = pathlib.Path(board_path).expanduser()
+        if src.is_dir():
+            try:
+                found = cfgmod.resolve_input_folder(src)
+            except cfgmod.ConfigError as e:
+                raise HTTPException(400, str(e)) from e
+            return _validate_board(json.loads(found.board.read_text())), found.board.name
         if not src.is_file():
-            raise HTTPException(400, f"board file not found: {src}")
+            raise HTTPException(400, f"board file or folder not found: {src}")
         try:
             return _validate_board(json.loads(src.read_text())), src.name
         except json.JSONDecodeError as e:
@@ -570,7 +589,12 @@ def board_slices(body: dict = Body(...)):
     board, _ = _load_board_from_body(body)
     if board is None:
         raise HTTPException(400, "provide board_path or board_json")
-    return {"board_name": board.get("name"), "candidates": _board_slice_candidates(board)}
+    folder = _input_folder(body)
+    # The name lives on the ROOT of a tree export, not at top level.
+    flat = cfgmod.normalize_board(board)
+    return {"board_name": flat.get("name"),
+            "candidates": _board_slice_candidates(board),
+            "backlog": bool(folder and (folder / "backlog.json").exists())}
 
 
 @app.post("/api/projects")
@@ -600,7 +624,13 @@ def create_project(body: dict = Body(...)):
     # file. Mirrors `new --project` on the CLI.
     if (body or {}).get("project_mode") is True:
         specs.mkdir(parents=True, exist_ok=True)
-        if board is not None and not has_board:
+        folder = _input_folder(body)
+        if folder is not None and not has_board:
+            # Hand the FOLDER to scaffold, not the parsed board: the reviewed
+            # backlog beside it is what makes planning deterministic, and
+            # re-serialising just the board would silently drop it.
+            project = cfgmod.scaffold(slug, str(folder), project_mode=True)
+        elif board is not None and not has_board:
             name = board_filename if (board_filename or "").endswith(".board.json") \
                 else f"{slug}.board.json"
             with tempfile.TemporaryDirectory() as td:
@@ -614,6 +644,9 @@ def create_project(body: dict = Body(...)):
             consent_written = cfgmod.record_db_reset_consent(project)
         return {"slug": slug, "created": not existed, "dir": str(project.dir),
                 "board": project.board_path.name, "project_mode": True,
+                "backlog": bool(project.backlog_path),
+                "planning": ("deterministic (reviewed backlog)"
+                             if project.backlog_path else "agent planner"),
                 "db_reset_consent_written": consent_written,
                 "next": f"POST /api/projects/{slug}/run-project"}
 
