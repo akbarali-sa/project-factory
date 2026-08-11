@@ -219,6 +219,35 @@ def splice_schema(existing: str, new_models: str) -> str:
     return existing
 
 
+_NEGATED_BEFORE_CODE = re.compile(
+    r"\b(?:not|never|rather than|instead of)\b[^.;]{0,16}$", re.I)
+
+
+def _expected_status_codes(text: str) -> set[str]:
+    """
+    Status codes a scenario genuinely EXPECTS.
+
+    A well-written scenario pins the failure mode it must not regress into —
+    "a request for an unknown container returns HTTP 404, not HTTP 500". A
+    plain findall reads that 500 as an expectation and then fails the contract
+    for not declaring it, i.e. it punishes the oracle for being precise (and
+    the only way to satisfy it would be to DECLARE 500 as a designed
+    response). Codes whose immediate context negates them are excluded; a code
+    asserted positively anywhere still counts.
+
+    Context is taken by INDEX rather than captured in the pattern: a greedy
+    prefix group swallows an earlier code on its way to a later one (so
+    "HTTP 422 ... not HTTP 500" loses the 422 entirely), and a lazy one never
+    sees the negation at all.
+    """
+    expected: set[str] = set()
+    for m in re.finditer(r"HTTP (\d{3})", text):
+        if _NEGATED_BEFORE_CODE.search(text[max(0, m.start() - 28):m.start()]):
+            continue
+        expected.add(m.group(1))
+    return expected
+
+
 def check_contract(contract: str, scenarios: dict, repo: str) -> Result:
     errors: list[str] = []
 
@@ -287,7 +316,7 @@ def check_contract(contract: str, scenarios: dict, repo: str) -> Result:
 
     # 4c. scenarios imply status codes -> contract must declare them
     declared = set(re.findall(r"['\"]?(\d{3})['\"]?:", openapi.group(1)))
-    expected = set(re.findall(r"HTTP (\d{3})", str(scenarios["scenarios"])))
+    expected = _expected_status_codes(str(scenarios["scenarios"]))
     if missing_codes := expected - declared:
         errors.append(f"scenarios expect status codes not in the contract: {sorted(missing_codes)}")
 

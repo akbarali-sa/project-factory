@@ -406,6 +406,39 @@ class DraftAssumptionsTests(unittest.TestCase):
                 planner.claude = orig
 
 
+class ExpectedStatusCodeTests(unittest.TestCase):
+    """A scenario that pins its failure mode ("404, not 500") must not be
+    read as demanding a 500 in the contract — that cost the barcode-v2 run a
+    crashed contract_lint after the architect had already been paid for."""
+
+    def test_positive_codes_expected(self) -> None:
+        from project_factory.harness import _expected_status_codes
+        self.assertEqual(
+            _expected_status_codes("returns HTTP 201 with the batch id"),
+            {"201"})
+
+    def test_negated_code_is_not_expected(self) -> None:
+        from project_factory.harness import _expected_status_codes
+        text = ("A request for an unknown batch id returns HTTP 404, not "
+                "HTTP 500")
+        self.assertEqual(_expected_status_codes(text), {"404"})
+
+    def test_other_negation_wordings(self) -> None:
+        from project_factory.harness import _expected_status_codes
+        for phrasing in ("HTTP 422 is returned, not HTTP 500",
+                         "responds HTTP 422 rather than HTTP 500",
+                         "returns HTTP 422 instead of HTTP 500",
+                         "never HTTP 500; the API returns HTTP 422"):
+            self.assertEqual(_expected_status_codes(phrasing), {"422"},
+                             phrasing)
+
+    def test_code_asserted_positively_elsewhere_still_counts(self) -> None:
+        from project_factory.harness import _expected_status_codes
+        text = ("the upload returns HTTP 503 when storage is unavailable. "
+                "A bad id returns HTTP 404, not HTTP 503")
+        self.assertEqual(_expected_status_codes(text), {"503", "404"})
+
+
 class ReasoningAgentSandboxTests(unittest.TestCase):
     """A reasoning agent's deliverable is the text it returns. During the
     barcode-v2 run the planner-layer agents inherited the operator's personal
