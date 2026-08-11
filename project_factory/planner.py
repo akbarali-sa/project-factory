@@ -716,11 +716,27 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
            "scenarios.\n"
            "  * Behaviour needing data from earlier waves belongs to those "
            "waves — reference it in given, do not respecify it.\n\n")
-        + "Return ONLY the YAML document (no fences, no commentary)."
+        + "YAML MECHANICS — two drafts have died here, so treat these as "
+        "hard rules:\n"
+        "  * A plain (unquoted) scalar may never contain '{', '[', ': ' or "
+        "' #'. Concrete example values are exactly where this bites: write\n"
+        "      then: ['expected counts are {\"1234\": 40, \"5678\": 25}']\n"
+        "    (single-quoted, one line) or a YAML block mapping — never a bare "
+        "brace-and-colon blob after 'then:'.\n"
+        "  * Quote every value containing a colon-space, and keep each "
+        "scenario field on ONE line unless you use a proper block scalar "
+        "('|' or '>').\n"
+        "  * Re-read your draft as YAML before returning it: if a human "
+        "would have to guess where a value ends, it will not parse.\n\n"
+        "Return ONLY the YAML document (no fences, no commentary)."
     )
 
     errors: list[str] = []
-    for attempt in range(2):
+    # Three attempts, not two: a YAML slip costs one whole attempt and says
+    # nothing about whether the agent understood the domain — losing the
+    # slice to a syntax error after ~$2.50 of good reasoning is the worst
+    # trade in the pipeline.
+    for attempt in range(3):
         out = claude(
             "oracle_author",
             prompt if not errors
@@ -747,7 +763,7 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
             return target
 
     raise PlanError(
-        f"oracle for {planned['id']} failed validation after 2 attempts:\n  "
+        f"oracle for {planned['id']} failed validation after 3 attempts:\n  "
         + "\n  ".join(errors))
 
 

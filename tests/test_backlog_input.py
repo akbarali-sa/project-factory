@@ -406,6 +406,48 @@ class DraftAssumptionsTests(unittest.TestCase):
                 planner.claude = orig
 
 
+class ReasoningAgentSandboxTests(unittest.TestCase):
+    """A reasoning agent's deliverable is the text it returns. During the
+    barcode-v2 run the planner-layer agents inherited the operator's personal
+    CLAUDE.md and spent minutes each writing Obsidian notes — wall-clock,
+    money, and this project's vocabulary leaked into a store other projects'
+    agents read."""
+
+    def _cmd_for(self, **kw) -> list[str]:
+        from project_factory import models
+        seen: dict = {}
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = cmd
+            class P:
+                returncode = 0
+                stdout = json.dumps({"result": "ok", "total_cost_usd": 0.0})
+                stderr = ""
+            return P()
+
+        orig = models.subprocess.run
+        models.subprocess.run = fake_run
+        try:
+            models.claude("architect", "do a thing", **kw)
+        finally:
+            models.subprocess.run = orig
+        return seen["cmd"]
+
+    def test_no_write_scope_disallows_file_tools(self) -> None:
+        cmd = self._cmd_for()
+        self.assertIn("--disallowedTools", cmd)
+        self.assertIn("Write", cmd)
+        self.assertIn("Edit", cmd)
+        appended = cmd[cmd.index("--append-system-prompt") + 1]
+        self.assertIn("do not apply to this invocation", appended.lower())
+
+    def test_write_scope_agent_keeps_its_tools(self) -> None:
+        cmd = self._cmd_for(write_scope=["apps/api/**"])
+        self.assertIn("acceptEdits", cmd)
+        self.assertNotIn("--append-system-prompt", cmd)
+        self.assertIn("Write(apps/api/**)", cmd)
+
+
 class AssumptionsValidationTests(unittest.TestCase):
     PENDING = [
         {"id": "q_key", "question": "barcode or sku?",

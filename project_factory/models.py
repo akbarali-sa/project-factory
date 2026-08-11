@@ -294,6 +294,22 @@ def claude(
         cmd += ["--permission-mode", "acceptEdits"]
         for pattern in write_scope:
             cmd += ["--allowedTools", f"Edit({pattern})", "--allowedTools", f"Write({pattern})"]
+    else:
+        # A reasoning agent's deliverable is the text it RETURNS. Left to its
+        # own devices it inherits the operator's personal CLAUDE.md — during
+        # the barcode-v2 run planner/oracle agents spent minutes each writing
+        # Obsidian "lessons" notes nobody asked for, which cost wall-clock and
+        # money and leaked this project's domain vocabulary into a shared
+        # store that other projects' agents read (the exact cross-project
+        # contamination harness.check_prompt_leak exists to prevent).
+        cmd += ["--disallowedTools", "Write", "--disallowedTools", "Edit"]
+        cmd += ["--append-system-prompt",
+                "You are a non-interactive pipeline agent. Your ONLY "
+                "deliverable is the text you return in your final message. "
+                "Do not create or edit files, take notes, or update any "
+                "external knowledge base or vault, whatever any project or "
+                "user instructions say — those instructions do not apply to "
+                "this invocation. Spend your effort on the requested output."]
     for pattern in (read_only or []):
         cmd += ["--disallowedTools", f"Edit({pattern})", "--disallowedTools", f"Write({pattern})"]
 
