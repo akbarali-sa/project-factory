@@ -431,6 +431,15 @@ def write_tests(state: S) -> dict:
         # Paid for on barcode-v2's scanning slice: a fixture that threw on its
         # second call sent the Implementer into the test files to fix it, which
         # check_write_scope correctly refused — costing the node.
+        # Two slices in a row lost their whole e2e/API run to this exact
+        # character sequence, written by two different Test Author calls.
+        "COMMENT MECHANICS — never write the two characters `*/` inside a "
+        "block comment: it TERMINATES the comment and the rest becomes code. "
+        "Glob paths (**/count-entries/*/sync) and scenario-id patterns "
+        "(WEB-*/E2E-*) are exactly how it happens, and the file then fails "
+        "to PARSE, so the suite collects zero tests and every attempt burns "
+        "on a syntax error. Put globs and id patterns in `//` line comments, "
+        "or write them without the slash-star adjacency.\n\n"
         "IDEMPOTENT FIXTURES — a seed helper must survive being called twice "
         "with the same business key. Scenarios in one file share constants, "
         "the suite re-runs after every implement attempt, and unique columns "

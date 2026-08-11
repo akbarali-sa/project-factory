@@ -93,6 +93,23 @@ def check_red_first(repo: str, slice_id: str, workspace: str = "@repo/api") -> R
         )
     if "0 passed" in res.output and "0 failed" in res.output:
         return Result(False, errors=["No tests were collected — file naming or config issue."])
+    # A file that fails to PARSE also "fails red", but it asserts nothing —
+    # the whole suite is a placebo until someone reads the runner output.
+    # Two consecutive slices shipped a `*/` inside a block comment (glob paths
+    # and WEB-*/E2E-* id patterns end block comments early), and the parse
+    # error surfaced only at verify time, a full implement cycle later.
+    # Precise markers only: red-first tests legitimately fail at IMPORT
+    # ("Cannot find module" — the implementation does not exist yet, which is
+    # the point), and vitest reports that as a failed suite too. Only a
+    # genuine syntax/transform failure means the oracle itself is broken.
+    parse_markers = ("PARSE_ERROR", "Transform failed with", "SyntaxError:")
+    if any(m in res.output for m in parse_markers):
+        detail = "\n".join(l for l in res.output.splitlines()
+                           if any(m in l for m in parse_markers))[:800]
+        return Result(False, errors=[
+            "Test files fail to PARSE — that is not a red test, it is a "
+            "broken oracle. Fix the syntax (a `*/` inside a block comment is "
+            f"the recurring cause):\n{detail}"])
     return Result(True, summary="tests fail as expected (red)")
 
 

@@ -657,6 +657,24 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
                        {"working_assumptions":
                         assumptions.get("working_assumptions", [])},
                        sort_keys=False, allow_unicode=True)[:9000] + "\n")
+    # The DELIVERED seed is a cross-slice contract. Wave 2's oracle pinned
+    # john.doe as Operator across 12 frozen call sites; wave 3's oracle named
+    # the same address as Admin, and the only ways to satisfy both were to
+    # break wave 2's frozen tests (the implementer's choice) or re-point wave
+    # 3's (the driver's cleanup). Giving the oracle author the shipped seed
+    # removes the conflict at the source: role assignments already delivered
+    # are facts, not choices.
+    seed_file = (project.repo_path / "apps" / "api" / "src" / "constants"
+                 / "demoData.ts")
+    if seed_file.exists():
+        extras += (
+            "DELIVERED SEED USERS (shipped by earlier waves — BINDING). "
+            "These identities and roles are facts about the running product; "
+            "your scenarios must never re-assign a seeded user's role. A "
+            "scenario needing a role signs in as the seeded user that "
+            "ALREADY holds it, or provisions a synthetic user:\n"
+            f"```ts\n{seed_file.read_text()[:3000]}\n```\n\n")
+
     if forbidden or plan.get("not_priced"):
         names = [f"{f['name']} ({f['id']})" for f in forbidden]
         behaviours = [b for n in plan.get("not_priced", [])

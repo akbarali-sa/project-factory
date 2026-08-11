@@ -553,6 +553,38 @@ class ExpectedStatusCodeTests(unittest.TestCase):
         self.assertEqual(_expected_status_codes(text), {"503", "404"})
 
 
+class RedFirstParseGuardTests(unittest.TestCase):
+    """A test file that fails to PARSE also 'fails red', but asserts nothing.
+    Two consecutive slices shipped a */ inside a block comment and the parse
+    error surfaced a full implement cycle later, at verify time."""
+
+    def _result(self, output: str, ok: bool = False):
+        from project_factory import harness
+        fake = harness.TestRun(ok=ok, output=output, summary="")
+        with unittest.mock.patch.object(harness, "run_tests", return_value=fake):
+            return harness.check_red_first("/repo", "slice_x")
+
+    def test_parse_error_is_a_broken_oracle_not_red(self) -> None:
+        res = self._result("Error: Transform failed with 1 error:\n"
+                           "[PARSE_ERROR] Expected a semicolon\n"
+                           "Tests  2 failed (2)")
+        self.assertFalse(res.ok)
+        self.assertIn("fail to PARSE", res.errors[0])
+
+    def test_missing_module_import_is_legitimately_red(self) -> None:
+        """Red-first tests import modules that DO NOT EXIST YET — that failure
+        is the point, and must not be mistaken for a parse error."""
+        res = self._result("Failed Suites 2\n"
+                           "Error: Cannot find module '../src/modules/reports'\n"
+                           "Tests  0 passed | 4 failed")
+        self.assertTrue(res.ok, res.errors)
+
+    def test_plain_assertion_failures_stay_red(self) -> None:
+        res = self._result("AssertionError: expected 404 to be 200\n"
+                           "Tests  3 failed | 1 passed")
+        self.assertTrue(res.ok, res.errors)
+
+
 class AggregateRequiredTests(unittest.TestCase):
     """An aggregate referenced only by PROVISIONAL scenarios must not be
     demanded of the contract — the architect refusing to model it is the
