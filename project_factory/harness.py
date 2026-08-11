@@ -166,11 +166,32 @@ def check_mutation(repo: str, target_glob: str = "apps/api/src/**/*.ts",
 # -----------------------------------------------------------------------------
 # 3. Traceability
 # -----------------------------------------------------------------------------
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+# Line comment, but not the `//` inside a URL scheme (https://…), which would
+# otherwise swallow the rest of a line that may carry a scenario id.
+_LINE_COMMENT = re.compile(r"(?<!:)//[^\n]*")
+
+
+def strip_ts_comments(text: str) -> str:
+    """Test CODE with the prose removed.
+
+    Traceability must be judged on what the tests DO, not on what their
+    comments mention, and the naive substring check was wrong in both
+    directions: a comment citing a blocked scenario ("SC-P04 leaves this
+    open" — exactly the note a careful Test Author should write) read as an
+    implementation, while a real scenario mentioned only in a comment counted
+    as covered. The second is the dangerous one: an untested scenario passes
+    because someone named it in prose.
+    """
+    return _LINE_COMMENT.sub("", _BLOCK_COMMENT.sub("", text))
+
+
 def check_traceability(repo: str, scenarios: dict) -> Result:
     test_dir = pathlib.Path(repo) / "apps/api/__tests__" / scenarios["slice"]["id"]
     if not test_dir.exists():
         return Result(False, errors=[f"missing test dir {test_dir}"])
-    blob = "\n".join(p.read_text() for p in test_dir.rglob("*.ts"))
+    blob = strip_ts_comments(
+        "\n".join(p.read_text() for p in test_dir.rglob("*.ts")))
 
     missing = [s["id"] for s in scenarios["scenarios"] if s["id"] not in blob]
     leaked = [

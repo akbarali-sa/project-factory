@@ -552,6 +552,52 @@ class ExpectedStatusCodeTests(unittest.TestCase):
         self.assertEqual(_expected_status_codes(text), {"503", "404"})
 
 
+class TraceabilityCommentTests(unittest.TestCase):
+    """Traceability must judge what the tests DO, not what their comments
+    mention. barcode-v2's scanning slice was rejected twice because a helper
+    carried the comment "SC-P04 leaves OPEN whether …" — exactly the note a
+    careful Test Author should write about a blocked scenario."""
+
+    def _run(self, file_text: str) -> list[str]:
+        from project_factory import harness
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td) / "apps/api/__tests__/slice_x"
+            d.mkdir(parents=True)
+            (d / "a.test.ts").write_text(file_text)
+            res = harness.check_traceability(td, {
+                "slice": {"id": "slice_x"},
+                "scenarios": [{"id": "SC-001"}],
+                "provisional_scenarios": [{"id": "SC-P04"}],
+            })
+            return res.errors
+
+    def test_blocked_id_in_a_line_comment_is_not_a_leak(self) -> None:
+        errors = self._run('it("SC-001 works", () => {});\n'
+                           '// SC-P04 leaves OPEN whether this is a URL\n')
+        self.assertEqual(errors, [])
+
+    def test_blocked_id_in_a_block_comment_is_not_a_leak(self) -> None:
+        errors = self._run('/**\n * SC-P04 is deliberately open.\n */\n'
+                           'it("SC-001 works", () => {});\n')
+        self.assertEqual(errors, [])
+
+    def test_blocked_id_in_real_code_is_still_a_leak(self) -> None:
+        errors = self._run('it("SC-001 works", () => {});\n'
+                           'it("SC-P04 shape of the value", () => {});\n')
+        self.assertTrue(any("SC-P04" in e for e in errors), errors)
+
+    def test_scenario_named_only_in_a_comment_is_still_missing(self) -> None:
+        """The dangerous direction: prose must not count as coverage."""
+        errors = self._run("// SC-001 will be covered later\n"
+                           'it("something else", () => {});\n')
+        self.assertTrue(any("SC-001" in e for e in errors), errors)
+
+    def test_url_does_not_swallow_an_id_after_it(self) -> None:
+        errors = self._run(
+            'it("SC-001 works", () => fetch("https://example.com/x"));\n')
+        self.assertEqual(errors, [])
+
+
 class ProvisionalScenarioGuardTests(unittest.TestCase):
     """commit_specs puts the oracle in the repo and the Test Author runs with
     cwd=repo, so it can read the scenarios the oracle parked behind open
