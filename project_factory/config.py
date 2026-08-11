@@ -404,7 +404,27 @@ class Project:
         return round(total, 2)
 
     def _write_state(self) -> None:
+        """
+        Merge onto what is on disk — never overwrite it wholesale.
+
+        Two components write this file: infra.sticky_ports records `ports`, and
+        this class records `slice_costs` / `completed_slices` /
+        `thread_generations`. A Project loads its state at discovery, so a
+        write-back of that snapshot silently DELETES anything written since —
+        which is exactly what happened to barcode-v2: sticky_ports saved its
+        allocation, mark_completed wrote a snapshot taken before it, and the
+        `ports` key vanished. Ports then re-allocated on the next slice, so the
+        generated app moved address between waves (3004/3005 → 3006/3007) and
+        every hand-run health check pointed at the wrong app.
+        """
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        on_disk: dict = {}
+        if self.state_file.exists():
+            try:
+                on_disk = json.loads(self.state_file.read_text())
+            except json.JSONDecodeError:
+                on_disk = {}
+        self.state = {**on_disk, **self.state}
         self.state_file.write_text(json.dumps(self.state, indent=2) + "\n")
 
 

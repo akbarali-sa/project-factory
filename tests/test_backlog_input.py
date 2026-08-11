@@ -553,6 +553,49 @@ class ExpectedStatusCodeTests(unittest.TestCase):
         self.assertEqual(_expected_status_codes(text), {"503", "404"})
 
 
+class AggregateRequiredTests(unittest.TestCase):
+    """An aggregate referenced only by PROVISIONAL scenarios must not be
+    demanded of the contract — the architect refusing to model it is the
+    correct behaviour (barcode-v2: WorkerProductivity, parked behind SPIKE-1;
+    the architect documented the refusal and check_contract crashed the
+    slice for it)."""
+
+    SCENARIOS = {
+        "scenarios": [
+            {"id": "SC-001", "title": "consolidated counts per container",
+             "then": ["the Container progress reflects synced count entries"]},
+        ],
+        "web_scenarios": [], "e2e_scenarios": [],
+        "provisional_scenarios": [
+            {"id": "SC-P03",
+             "title": "Per-worker productivity aggregation",
+             "blocked_by": "SPIKE-1"},
+        ],
+    }
+
+    def test_active_aggregate_is_required(self) -> None:
+        from project_factory.harness import _aggregate_required
+        self.assertTrue(_aggregate_required("Container", self.SCENARIOS))
+
+    def test_provisional_only_aggregate_is_not_required(self) -> None:
+        from project_factory.harness import _aggregate_required
+        # matched via camelCase-split prose ("per-worker productivity")
+        self.assertFalse(_aggregate_required("WorkerProductivity", self.SCENARIOS))
+
+    def test_unreferenced_aggregate_stays_required(self) -> None:
+        """The 'contract simply forgot' case must stay loud."""
+        from project_factory.harness import _aggregate_required
+        self.assertTrue(_aggregate_required("PackingList", self.SCENARIOS))
+
+    def test_active_reference_wins_over_provisional(self) -> None:
+        from project_factory.harness import _aggregate_required
+        sc = json.loads(json.dumps(self.SCENARIOS))
+        sc["scenarios"].append(
+            {"id": "SC-002", "title": "worker productivity summary row",
+             "then": ["a row per worker"]})
+        self.assertTrue(_aggregate_required("WorkerProductivity", sc))
+
+
 class TraceabilityCommentTests(unittest.TestCase):
     """Traceability must judge what the tests DO, not what their comments
     mention. barcode-v2's scanning slice was rejected twice because a helper
@@ -650,6 +693,45 @@ class ProvisionalScenarioGuardTests(unittest.TestCase):
             "provisional_scenarios": [],
         })
         self.assertNotIn("BLOCKED SCENARIOS", prompt)
+
+
+class StateMergeTests(unittest.TestCase):
+    """Two components write .factory/state.json. A Project holds the snapshot
+    it loaded at discovery, so writing it back wholesale deletes whatever the
+    other writer added since. barcode-v2 lost infra.sticky_ports' `ports` key
+    that way, so the generated app changed address between waves and every
+    hand-run health check pointed at the wrong app."""
+
+    def test_write_preserves_keys_added_by_another_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project = _project(td)
+            project.mark_completed("slice_a")          # snapshot written
+
+            # another writer (infra.sticky_ports) records its allocation
+            sf = project.state_file
+            on_disk = json.loads(sf.read_text())
+            on_disk["ports"] = {"api": 3006, "web": 3007}
+            sf.write_text(json.dumps(on_disk))
+
+            # this Project still holds the PRE-ports snapshot
+            project.record_slice_cost("slice_a", 12.5)
+
+            final = json.loads(sf.read_text())
+            self.assertEqual(final["ports"], {"api": 3006, "web": 3007})
+            self.assertEqual(final["completed_slices"], ["slice_a"])
+            self.assertEqual(final["slice_costs"]["slice_a"], 12.5)
+
+    def test_our_own_updates_still_win(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project = _project(td)
+            project.record_slice_cost("slice_a", 5.0)
+            sf = project.state_file
+            stale = json.loads(sf.read_text())
+            stale["slice_costs"] = {"slice_a": 1.0}
+            sf.write_text(json.dumps(stale))
+            project.record_slice_cost("slice_a", 9.0)
+            self.assertEqual(
+                json.loads(sf.read_text())["slice_costs"]["slice_a"], 9.0)
 
 
 class RepoDevServerSweepTests(unittest.TestCase):

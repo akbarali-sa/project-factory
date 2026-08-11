@@ -269,6 +269,31 @@ def _expected_status_codes(text: str) -> set[str]:
     return expected
 
 
+def _aggregate_required(agg: str, scenarios: dict) -> bool:
+    """
+    Must the contract account for this oracle aggregate?
+
+    Required when ACTIVE scenarios reference it; NOT required when only
+    PROVISIONAL scenarios do — those are parked behind unanswered questions,
+    and a contract that models the aggregate anyway invents the answer.
+    An aggregate referenced by no scenario at all stays required: that is the
+    "contract simply forgot" case this check exists for, and silently waving
+    it through because nobody mentioned it would gut the check.
+
+    Matching is on the raw name and its camelCase-split prose form —
+    scenarios say "per-worker productivity", not "WorkerProductivity".
+    """
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", agg).lower()
+    active = json.dumps([scenarios.get(g) or [] for g in
+                         ("scenarios", "web_scenarios", "e2e_scenarios")]).lower()
+    provisional = json.dumps(scenarios.get("provisional_scenarios") or []).lower()
+    in_active = agg.lower() in active or spaced in active
+    in_provisional = agg.lower() in provisional or spaced in provisional
+    if in_active:
+        return True
+    return not in_provisional
+
+
 def check_contract(contract: str, scenarios: dict, repo: str) -> Result:
     errors: list[str] = []
 
@@ -323,7 +348,16 @@ def check_contract(contract: str, scenarios: dict, repo: str) -> Result:
     # other tables on request; demanding a table for it would be demanding a
     # denormalised cache nobody asked for. What must never pass is an
     # aggregate the contract simply forgot.
+    #
+    # EXCEPT an aggregate whose scenarios are all PROVISIONAL: the oracle
+    # parked them behind open questions, so an architect who models the
+    # aggregate anyway is inventing the answer (and pricing it). barcode-v2's
+    # reporting slice had exactly this — WorkerProductivity, referenced only
+    # by two SPIKE-blocked scenarios; the architect refused it, documented
+    # why, and this check crashed the slice for the refusal.
     for agg in scenarios["aggregates"]:
+        if not _aggregate_required(agg, scenarios):
+            continue
         in_schema = re.search(rf"model\s+{agg}\b", merged)
         # Substring, deliberately: a read-model surfaces under names built
         # AROUND the aggregate's ("calculateWorkerProductivity",
