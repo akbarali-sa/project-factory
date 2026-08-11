@@ -805,6 +805,8 @@ def _print_plan(plan: dict) -> None:
     for s in sorted(plan.get("slices", []), key=lambda x: (x["wave"], x["id"])):
         print(f"  w{s['wave']} {s['id']:40} {len(s.get('event_ids', []))} events"
               f"  — {s.get('name', '')}")
+        if s.get("size_warning"):
+            print(f"      ! {s['size_warning']}")
     for o in plan.get("out_of_scope", []):
         print(f"  --  {o.get('id', '?'):40} out of scope: {o.get('reason', '')[:80]}")
 

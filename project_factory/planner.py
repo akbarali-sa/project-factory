@@ -286,6 +286,12 @@ def plan_from_backlog(project: cfgmod.Project, board: dict) -> dict:
     foundation = [s for s in stories
                   if not epics.get(s["epic"], {}).get("bounded_context")]
 
+    # An epic carrying no stories is a heading, not deliverable work — it
+    # would otherwise become a slice with no events and fail validation with
+    # a message about the plan rather than about the backlog.
+    domain_epics = [e for e in domain_epics
+                    if any(s["epic"] == e["id"] for s in stories)]
+
     slices, epic_slice_id = [], {}
     for wave, epic in enumerate(domain_epics, start=1):
         bc = epic["bounded_context"]
@@ -330,6 +336,22 @@ def plan_from_backlog(project: cfgmod.Project, board: dict) -> dict:
         if src in wave_of and dst in wave_of and wave_of[src] > wave_of[dst]:
             errors.append(f"wave inversion: '{dst}' (wave {wave_of[dst]}) "
                           f"consumes '{src}' scheduled later (wave {wave_of[src]})")
+
+    # An epic is an ESTIMATION unit; a slice is a DELIVERY unit, and they are
+    # not the same size. barcode-v2's ingestion epic became one 7-event slice
+    # whose oracle ran to 33 scenarios: the Test Author cost $12.26 and
+    # finished two seconds inside its ceiling, and the Implementer was killed
+    # by it. Flagged rather than auto-split — splitting an epic mid-dependency
+    # can produce a slice nobody can demo (parsing with no upload), which is a
+    # judgement call for whoever approves the plan, not a rule to apply blind.
+    for s in slices:
+        if len(s.get("event_ids", [])) > 6:
+            s["size_warning"] = (
+                f"{len(s['event_ids'])} events from {len(s.get('stories', []))} "
+                "stories — larger than the 3-6 event slice that runs "
+                "comfortably. Expect a long, expensive Test Author and "
+                "Implementer; consider splitting it along story boundaries "
+                "before approving.")
 
     unsliced = ids - set(wave_of)
     plan = {

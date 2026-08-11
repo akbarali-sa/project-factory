@@ -334,6 +334,41 @@ class PlanFromBacklogTests(unittest.TestCase):
             on_disk = json.loads(planner.plan_path(project).read_text())
             self.assertEqual(on_disk["slices"][0]["id"], ids[0])
 
+    def test_oversized_slice_is_flagged_for_the_approver(self) -> None:
+        """An epic is an estimation unit, a slice is a delivery unit. The
+        7-event ingestion slice cost $12.26 in tests alone and killed the
+        Implementer on its ceiling — the approver must see that coming."""
+        with tempfile.TemporaryDirectory() as td:
+            project = _project(td)
+            plan = planner.plan_from_backlog(
+                project, cfgmod.load_board(project.board_path))
+            small = [s for s in plan["slices"] if s["id"].endswith("scanning")]
+            self.assertFalse(any(s.get("size_warning") for s in small))
+
+            # a 7-event ingestion epic: three more board events, one more
+            # story owning them
+            tree = _tree()
+            tree["root"]["business_events"] += [
+                _event(f"be_extra_{i}", f"Extra step {i}") for i in range(3)]
+            (project.dir / "specs" / "widget.board.json").write_text(
+                json.dumps(tree))
+            backlog = _backlog()
+            backlog["stories"].append(
+                {"id": "ING-3", "epic": "EPIC-02", "wave": 2,
+                 "status": "ready", "priced": True, "title": "Extra steps",
+                 "board_nodes": [f"be_extra_{i}" for i in range(3)],
+                 "depends_on": [], "tasks": []})
+            backlog["stories"][3]["epic"] = "EPIC-02"
+            (project.dir / "specs" / "backlog.json").write_text(
+                json.dumps(backlog))
+            planner.plan_path(project).unlink()
+            plan = planner.plan_from_backlog(
+                project, cfgmod.load_board(project.board_path))
+            ing = next(s for s in plan["slices"]
+                       if s["id"] == "slice_packing_list_ingestion")
+            self.assertGreater(len(ing["event_ids"]), 6)
+            self.assertIn("consider splitting", ing["size_warning"])
+
     def test_story_pricing_a_deferred_event_fails(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             project = _project(td)
