@@ -391,12 +391,29 @@ def migrate(state: S) -> dict:
 # =============================================================================
 def write_tests(state: S) -> dict:
     sc, slug = state["scenarios"], state["scenarios"]["slice"]["id"]
+    # commit_specs copies the oracle INTO the repo, and this agent runs with
+    # cwd=repo — so it can read the whole file, including the scenarios the
+    # oracle deliberately parked behind unanswered questions. Naming them as
+    # forbidden is cheaper than letting check_traceability catch it afterwards:
+    # on barcode-v2's scanning slice a single implemented provisional scenario
+    # threw away a completed $12 Test Author run.
+    provisional = [s.get("id") for s in sc.get("provisional_scenarios") or []
+                   if s.get("id")]
+    blocked = (
+        "BLOCKED SCENARIOS — the oracle parked these behind open questions "
+        f"nobody has answered: {provisional}. They are in the scenarios file "
+        "you can read in specs/, and they are NOT yours to write. Do not "
+        "write a test for any of them, not even a skipped or placeholder one; "
+        "a test asserting a behaviour no source has decided invents the "
+        "answer. Write tests ONLY for the scenarios listed below.\n\n"
+    ) if provisional else ""
     claude(
         "test_author",
         "Write executable tests from approved scenarios. Two suites:\n"
         f"  1. Vitest API integration tests -> apps/api/__tests__/{slug}/\n"
         f"  2. Playwright E2E tests -> apps/web/__tests__/e2e/{slug}/\n\n"
-        "Rules: one test per scenario; put the scenario id in the test name; "
+        + blocked
+        + "Rules: one test per scenario; put the scenario id in the test name; "
         "assert exactly what the scenario states. Write NO implementation code. "
         "Do NOT weaken assertions — these SHOULD fail now, because the feature "
         "does not exist yet. Never use it.skip.\n\n"

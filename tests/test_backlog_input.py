@@ -552,6 +552,59 @@ class ExpectedStatusCodeTests(unittest.TestCase):
         self.assertEqual(_expected_status_codes(text), {"503", "404"})
 
 
+class ProvisionalScenarioGuardTests(unittest.TestCase):
+    """commit_specs puts the oracle in the repo and the Test Author runs with
+    cwd=repo, so it can read the scenarios the oracle parked behind open
+    questions. check_traceability catches an implemented one, but only after
+    the run is paid for — barcode-v2's scanning slice lost a $12 Test Author
+    to a single provisional scenario."""
+
+    def _prompt_for(self, scenarios: dict) -> str:
+        from project_factory import graph
+        seen: dict = {}
+
+        def fake_claude(agent, prompt, **kw):
+            seen["prompt"] = prompt
+            raise RuntimeError("stop after prompt")
+
+        with tempfile.TemporaryDirectory() as td:
+            state = {
+                "scenarios": scenarios, "contract": "```prisma\n```",
+                "repo_path": td, "usage": None, "cfg": {},
+                "project_dir": td, "slice_id": "slice_x",
+            }
+            orig = graph.claude
+            graph.claude = fake_claude
+            try:
+                graph.write_tests(state)
+            except RuntimeError:
+                pass
+            finally:
+                graph.claude = orig
+        return seen.get("prompt", "")
+
+    def test_provisional_ids_are_named_as_forbidden(self) -> None:
+        prompt = self._prompt_for({
+            "slice": {"id": "slice_x"},
+            "scenarios": [{"id": "SC-001", "title": "t", "when": "w",
+                           "then": ["ok"], "traces_to": []}],
+            "provisional_scenarios": [{"id": "SC-P04", "title": "blocked",
+                                       "blocked_by": "q_open"}],
+        })
+        self.assertIn("SC-P04", prompt)
+        self.assertIn("NOT yours to write", prompt)
+        self.assertIn("not even a skipped", prompt)
+
+    def test_no_blocked_section_when_nothing_is_provisional(self) -> None:
+        prompt = self._prompt_for({
+            "slice": {"id": "slice_x"},
+            "scenarios": [{"id": "SC-001", "title": "t", "when": "w",
+                           "then": ["ok"], "traces_to": []}],
+            "provisional_scenarios": [],
+        })
+        self.assertNotIn("BLOCKED SCENARIOS", prompt)
+
+
 class WriteEnvCorsTests(unittest.TestCase):
     """The API builds its CORS allowlist from NEXT_PUBLIC_WEB_URL. Left at the
     template's :3000 while sticky_ports moved the web app elsewhere, every
