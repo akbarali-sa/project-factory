@@ -67,7 +67,7 @@ re-deriving anything here from scratch.
    spending a single token — a wrong scenario count here means step 3 failed.
 5. Climb the cheap-first ladder rather than jumping to a full run:
    ```
-   --until gap_detect     (~free, Haiku)
+   --until gap_detect     (~cents, Sonnet)
    [approve Gate A]
    --until baseline       ($0 — starter clones + builds green)
    --until provision_db   ($0 — db up, migrated, seeded)

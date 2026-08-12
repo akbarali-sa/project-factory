@@ -1,7 +1,7 @@
 """
 Project Factory — full first-slice pipeline (LangGraph, Python).
 
-  ingest(det) -> gap_detect(HAIKU) -> [GATE A]
+  ingest(det) -> gap_detect(SONNET) -> [GATE A]
   -> clone_starter(det) -> provision_db(det) -> baseline(det) -> commit_specs(det)
   -> architect(OPUS) -> contract_lint(det) -> [GATE B]
   -> migrate(det)
@@ -150,7 +150,7 @@ def ingest(state: S) -> dict:
 
 
 # =============================================================================
-# 2. Spec Analyst (AGENT — Haiku)
+# 2. Spec Analyst (AGENT — Sonnet)
 # =============================================================================
 def gap_detect(state: S) -> dict:
     digest = [{

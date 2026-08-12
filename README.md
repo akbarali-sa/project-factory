@@ -9,7 +9,7 @@ behind a gated LangGraph spine. The IP is the presales-to-contract pipeline, the
 independent test oracle, and the gates.
 
 ```
-ingest(det) → gap_detect(HAIKU) → [GATE A: spec + scenarios]
+ingest(det) → gap_detect(SONNET) → [GATE A: spec + scenarios]
 → clone_starter(det) → provision_db(det) → baseline(det) → commit_specs(det)
 → architect(OPUS) → contract_lint(det) → [GATE B: contract freeze]
 → migrate(det) → write_tests(SONNET) → red_first(det)

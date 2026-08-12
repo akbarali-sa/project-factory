@@ -67,7 +67,7 @@ NODE_ORDER = [
 
 # Rungs of the cheap-first ladder, with what each one buys you.
 LADDER = {
-    "gap_detect": "IR parses, gaps found (~free, Haiku)",
+    "gap_detect": "IR parses, gaps found (~cents, Sonnet)",
     "baseline": "starter clones at pinned ref and builds green ($0)",
     "provision_db": "postgres up, migrated, template users seeded ($0)",
     "migrate": "contract validated and schema applied (~$1)",

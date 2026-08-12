@@ -2,7 +2,7 @@
 Model tiering + the Claude Code invocation wrapper.
 
 WHY TIER AT ALL
-    Cost. A gap-detection pass is classification (Haiku handles it); contract
+    Cost. A gap-detection pass is light reading (Sonnet, once per slice); contract
     design and failure diagnosis are hard reasoning (Opus). Paying Opus rates
     for every node is how "$15 per project" turns into $900.
 
@@ -49,9 +49,12 @@ API_ID = {
 # Per-agent tier. This is the table from the design, made executable.
 # -----------------------------------------------------------------------------
 AGENT_TIER: dict[str, str] = {
-    # Classification over the IR. Cheap model is sufficient; if recall on
-    # obvious gaps is < ~90%, fix the prompt, not the model.
-    "spec_analyst": "haiku",
+    # Classification over the IR. Was Haiku ("cheap model is sufficient"),
+    # bumped to Sonnet per Akbar 2026-08-12: with backlog-folder inputs the
+    # digest now carries structured questions/criticality worth real reading,
+    # and the step runs once per slice (~$0.08 on barcode-v2) — the cost
+    # difference is noise next to a single missed gap reaching the architect.
+    "spec_analyst": "sonnet",
 
     # Hard reasoning, small output, high blast radius (everything downstream
     # depends on the contract). Worth Opus.

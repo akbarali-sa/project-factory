@@ -3,7 +3,7 @@ Project Factory — presales artifacts -> generated, test-passing vertical slice
 
 Pipeline shape (see graph.py for the wiring):
 
-    ingest(det) -> gap_detect(HAIKU) -> [GATE A: spec + scenarios]
+    ingest(det) -> gap_detect(SONNET) -> [GATE A: spec + scenarios]
     -> clone_starter(det) -> provision_db(det) -> baseline(det) -> commit_specs(det)
     -> architect(OPUS) -> contract_lint(det) -> [GATE B: contract freeze]
     -> migrate(det) -> write_tests(SONNET) -> red_first(det)
