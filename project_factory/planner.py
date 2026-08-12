@@ -1105,10 +1105,31 @@ def validate_oracle(text: str, planned: dict, *,
                     break
 
     if board_text is not None:
+        # Scan CONTENT, not boilerplate: the verbatim starter_constraints
+        # block is starter-kit truth that legitimately contains words other
+        # projects' boards harvested, and mapping KEYS are exemplar structure
+        # (field names, not domain content). Scanning the raw text made every
+        # oracle for a project whose board lacks those words unpassable —
+        # three Opus attempts died on it before this scan was narrowed to
+        # the draft's own string VALUES.
+        content_parts: list[str] = []
+
+        def _walk(v) -> None:
+            if isinstance(v, str):
+                content_parts.append(v)
+            elif isinstance(v, dict):
+                for x in v.values():
+                    _walk(x)
+            elif isinstance(v, list):
+                for x in v:
+                    _walk(x)
+
+        _walk({k: v for k, v in data.items() if k != "starter_constraints"})
+        content_text = " ".join(content_parts)
         registry = (harness.DOMAIN_NOUNS + harness.EXEMPLAR_NOUNS
                     + (extra_nouns or []))
         for noun in registry:
-            if (harness.mentions_noun(noun, text)
+            if (harness.mentions_noun(noun, content_text)
                     and not harness.mentions_noun(noun, board_text)):
                 errors.append(
                     f"domain noun '{noun}' does not appear on this project's "
