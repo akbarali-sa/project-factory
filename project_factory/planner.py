@@ -517,8 +517,13 @@ def draft_assumptions(project: cfgmod.Project, *, usage: Usage | None = None,
         "'TBD', never a menu of options.\n"
         "  * Prefer the reading that keeps unpriced capabilities out of "
         "scope; never assume a deferred capability into existence.\n"
-        "  * Keep the two-role model (no third role) unless a question's own "
-        "text states otherwise.\n"
+        # Deliberately data-driven: the ROLE/actor model is an engagement
+        # fact carried by the board and the backlog's hard_constraints (in
+        # backlog_ctx below) — hard-coding one engagement's role count here is
+        # how barcode facts leak into every future project's assumptions.
+        "  * Never invent actors, roles, or permission tiers beyond those "
+        "the board and the hard constraints already name; an assumption may "
+        "narrow the actor model, never widen it.\n"
         "  * rationale = one sentence on why this is the safe default and "
         "what would change if the client answers differently.\n\n"
         f"Pending questions ({len(pending)}):\n{json.dumps(pending, indent=1)}\n"
@@ -685,7 +690,8 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
             "for them: no scenario, no rejection path, no test may assert "
             "any of the following behaviours (they are the unpriced "
             f"capabilities by the back door): {behaviours}. Where a failure "
-            "BRANCH is legitimately in scope (e.g. a sync attempt can fail), "
+            "BRANCH is legitimately in scope (an outbound call can mechanically "
+            "fail), "
             "the scenario may assert the failure is SURFACED — never that it "
             "is retried, queued, recovered or corrected.\n\n")
 
@@ -758,9 +764,13 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
            "waves — reference it in given, do not respecify it.\n\n")
         + "YAML MECHANICS — two drafts have died here, so treat these as "
         "hard rules:\n"
+        # The example is deliberately CONTENT-FREE (k1/k2): a domain-flavored
+        # example here would be vocabulary the drafting agent copies into
+        # every project's oracle — the exact leak the exemplar-canary check
+        # exists to catch.
         "  * A plain (unquoted) scalar may never contain '{', '[', ': ' or "
         "' #'. Concrete example values are exactly where this bites: write\n"
-        "      then: ['expected counts are {\"1234\": 40, \"5678\": 25}']\n"
+        "      then: ['response mapping is {\"k1\": 10, \"k2\": 25}']\n"
         "    (single-quoted, one line) or a YAML block mapping — never a bare "
         "brace-and-colon blob after 'then:'.\n"
         "  * Quote every value containing a colon-space, and keep each "

@@ -227,8 +227,10 @@ def _cmd_serve(args) -> int:
     print(f"branch      {branch}")
     print(f"slices      {len(project.state.get('completed_slices', []))} delivered")
     print(infra.launch_stack(repo, stack))
-    print(f"\n  web  {stack.web_url}   (sign in as john.doe@example.com — "
-          f"ADMIN; jane.doe@ / mark.s@ are OPERATORs)")
+    # Roles per seeded user are a PROJECT fact, not a factory fact — the seed
+    # is the authority (barcode-v2 already inverted the starter's default).
+    print(f"\n  web  {stack.web_url}   (seeded logins + roles: "
+          f"apps/api/src/constants/demoData.ts)")
     print(f"  api  {stack.api_url}/api/docs")
     print("\nThe stack keeps running after this command returns.")
     return 0

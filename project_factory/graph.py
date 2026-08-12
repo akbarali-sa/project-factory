@@ -125,9 +125,9 @@ def ingest(state: S) -> dict:
     board = config.load_board(state["board_path"])
     scen = yaml.safe_load(pathlib.Path(state["scenarios_path"]).read_text())
     in_scope = [e for e in board["business_events"] if config.event_in_scope(e)]
-    # Slim the decision log to this slice's neighbourhood: a reworked board
-    # of record carries 70+ entries (~170KB) — global ones and those touching
-    # this slice's events stay, each truncated; the rest are on the board.
+    # Scope the decision log to this slice's neighbourhood: global entries
+    # and those touching this slice's events stay, IN FULL; entries about
+    # other slices' events live on the board. Relevance filter, not a cap.
     slice_ids = {t for g in ("scenarios", "web_scenarios", "e2e_scenarios")
                  for s in scen.get(g) or [] for t in s.get("traces_to") or []}
     decisions = [
@@ -435,7 +435,7 @@ def write_tests(state: S) -> dict:
         # character sequence, written by two different Test Author calls.
         "COMMENT MECHANICS — never write the two characters `*/` inside a "
         "block comment: it TERMINATES the comment and the rest becomes code. "
-        "Glob paths (**/count-entries/*/sync) and scenario-id patterns "
+        "Glob paths (**/items/*/detail) and scenario-id patterns "
         "(WEB-*/E2E-*) are exactly how it happens, and the file then fails "
         "to PARSE, so the suite collects zero tests and every attempt burns "
         "on a syntax error. Put globs and id patterns in `//` line comments, "
@@ -683,8 +683,11 @@ def park_e2e(state: S) -> dict:
 # =============================================================================
 def teardown(state: S) -> dict:
     if state["cfg"].get("keep_stack_running"):
+        # No hard-coded login hint: which seeded user holds which role is a
+        # PROJECT fact (barcode-v2's own seed inverted the starter default),
+        # and a stale email here misdirects whoever opens the app.
         return {"log": [f"stack left running for inspection: {state['stack'].web_url} "
-                        f"(sign in as john.doe@example.com)"]}
+                        f"(seeded logins: apps/api/src/constants/demoData.ts)"]}
     infra.teardown(state["repo_path"], state["stack"],
                    keep_db=state["cfg"].get("keep_db", False))
     return {"log": ["stack stopped, postgres down"]}
