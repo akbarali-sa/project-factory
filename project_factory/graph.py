@@ -131,10 +131,10 @@ def ingest(state: S) -> dict:
     slice_ids = {t for g in ("scenarios", "web_scenarios", "e2e_scenarios")
                  for s in scen.get(g) or [] for t in s.get("traces_to") or []}
     decisions = [
-        {**d, "text": (d.get("text") or "")[:400]}
+        d
         for d in board.get("decision_log", [])
         if not d.get("related_node_id") or d["related_node_id"] in slice_ids
-    ][:80]
+    ]
     return {
         "ir": {"project": board["name"], "events": in_scope,
                "processes": board.get("processes", []),
@@ -157,7 +157,7 @@ def gap_detect(state: S) -> dict:
         "id": e["id"], "name": e["name"],
         "rules": len(e["implementation"].get("business_rules", [])),
         "ac": len(e["implementation"].get("acceptance_criteria", [])),
-        "open_questions": [q["question"][:200] for q in e.get("questions", [])
+        "open_questions": [q["question"] for q in e.get("questions", [])
                            if q.get("status") != "answered"],
     } for e in state["ir"]["events"]]
 
@@ -308,7 +308,7 @@ def architect(state: S) -> dict:
         "`prisma validate` runs on the result, and a commented-out change "
         "leaves every relation that depends on it dangling.\n\n"
         f"Aggregates: {sc['aggregates']}\n\n"
-        f"Domain events:\n{json.dumps(relevant, indent=1)[:6000]}\n\n"
+        f"Domain events:\n{json.dumps(relevant, indent=1)}\n\n"
         f"API scenarios the contract must satisfy:\n"
         f"{render_scenarios(sc['scenarios'])}\n\n"
         f"Web scenarios (screens that will consume it):\n"
@@ -482,7 +482,7 @@ def write_tests(state: S) -> dict:
         "may repeat. Navigation, index rows and detail screens routinely "
         "render the SAME action labels; a bare getByText is ambiguous the "
         "moment a later slice adds a nav link.\n\n"
-        f"Frozen contract:\n{state['contract'][:4500]}\n\n"
+        f"Frozen contract:\n{state['contract']}\n\n"
         f"API scenarios:\n{render_scenarios(sc['scenarios'])}\n\n"
         f"Web scenarios:\n{render_scenarios(sc.get('web_scenarios', []))}\n\n"
         f"E2E scenarios:\n{render_scenarios(sc.get('e2e_scenarios', []))}",
@@ -511,8 +511,13 @@ def _implement(state: S, phase: str, scope: list[str], instruction: str) -> dict
     n = state["attempts"].get(phase, 0)
     fix = ""
     if state["diagnosis"].get(phase):
+        # digest_failures, not a raw tail-slice: dedup is noise control over
+        # unbounded runtime logs (one root cause arrives once per browser
+        # project), while a [-3000:] tail was TRUNCATION — it kept whatever
+        # happened to fail last and hid the first, often causal, failure.
         fix = (f"\n\nPrevious attempt failed. Diagnosis:\n{state['diagnosis'][phase]}\n\n"
-               f"Authoritative failure output:\n{state['phase_out'].get(phase,'')[-3000:]}")
+               f"Authoritative failure output (deduplicated):\n"
+               f"{digest_failures(state['phase_out'].get(phase, ''))}")
     claude(
         "implementer",
         f"{instruction}\n\n"
@@ -536,7 +541,7 @@ def _implement(state: S, phase: str, scope: list[str], instruction: str) -> dict
         "and starts the stack; pinning a port or altering the boot sequence "
         "breaks it silently and resurfaces as failures that look like product "
         "bugs. Behaviour changes belong in src/.\n\n"
-        f"Frozen contract:\n{state['contract'][:4500]}{fix}",
+        f"Frozen contract:\n{state['contract']}{fix}",
         cwd=state["repo_path"], attempt=n, write_scope=scope, read_only=READ_ONLY,
         usage=state["usage"], budget_usd=_budget(state), log_path=_log_path(state),
     )
@@ -626,9 +631,14 @@ def _diagnose(state: S, phase: str) -> dict:
         # browser projects, so one root cause arrives four times verbatim.
         # Slice 3's diagnostician read 80 copies of a single dead web server
         # and charged $12.89 to conclude nothing.
+        # The failure DIGEST stays deduplicated (that is noise control over
+        # unbounded runtime logs, not spec truncation), but its tail-slice is
+        # gone and the contract goes in whole: a diagnostician reasoning about
+        # a schema mismatch with 2,500 chars of a 10KB contract sees the
+        # models but not the endpoints they feed.
         f"Phase: {phase}\n\nFailures (deduplicated):\n"
-        f"{digest_failures(state['phase_out'].get(phase, ''))[-6000:]}\n\n"
-        f"Contract:\n{state['contract'][:2500]}",
+        f"{digest_failures(state['phase_out'].get(phase, ''))}\n\n"
+        f"Contract:\n{state['contract']}",
         cwd=state["repo_path"], usage=state["usage"], budget_usd=_budget(state), log_path=_log_path(state),
     )
     return {"diagnosis": {phase: out}, "usage": state["usage"],

@@ -117,9 +117,9 @@ def _digest_event(e: dict) -> dict:
         "actors": [a.get("label") for a in e.get("actors", [])],
         "acceptance_criteria": impl.get("acceptance_criteria", []),
         "business_rules": impl.get("business_rules", []),
-        "open_questions": [q["question"][:200] for q in e.get("questions", [])
+        "open_questions": [q["question"] for q in e.get("questions", [])
                            if q.get("status") != "answered"],
-        "nfrs": [n.get("requirement", "")[:200] for n in e.get("nfrs", [])],
+        "nfrs": [n.get("requirement", "") for n in e.get("nfrs", [])],
     }
 
 
@@ -643,10 +643,10 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
     if planned.get("stories"):
         extras += ("Reviewed backlog stories this slice implements — honour "
                    "their boundaries, task intent and caveats:\n"
-                   f"{json.dumps(planned['stories'], indent=1)[:9000]}\n\n")
+                   f"{json.dumps(planned['stories'], indent=1)}\n\n")
     if plan.get("hard_constraints"):
         extras += ("HARD CONSTRAINTS (engagement-wide, non-negotiable):\n"
-                   f"{json.dumps(plan['hard_constraints'], indent=1)[:4000]}\n\n")
+                   f"{json.dumps(plan['hard_constraints'], indent=1)}\n\n")
     assumptions = load_assumptions(project)
     if assumptions:
         extras += ("APPROVED WORKING ASSUMPTIONS — treat each as decided; "
@@ -656,7 +656,7 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
                    + yaml.safe_dump(
                        {"working_assumptions":
                         assumptions.get("working_assumptions", [])},
-                       sort_keys=False, allow_unicode=True)[:9000] + "\n")
+                       sort_keys=False, allow_unicode=True) + "\n")
     # The DELIVERED seed is a cross-slice contract. Wave 2's oracle pinned
     # john.doe as Operator across 12 frozen call sites; wave 3's oracle named
     # the same address as Admin, and the only ways to satisfy both were to
@@ -673,7 +673,7 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
             "your scenarios must never re-assign a seeded user's role. A "
             "scenario needing a role signs in as the seeded user that "
             "ALREADY holds it, or provisions a synthetic user:\n"
-            f"```ts\n{seed_file.read_text()[:3000]}\n```\n\n")
+            f"```ts\n{seed_file.read_text()}\n```\n\n")
 
     if forbidden or plan.get("not_priced"):
         names = [f"{f['name']} ({f['id']})" for f in forbidden]
@@ -731,9 +731,9 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
         f"Slice to author (from the approved project plan):\n"
         f"{json.dumps({k: planned[k] for k in ('id', 'name', 'wave', 'bounded_context', 'event_ids')}, indent=1)}\n\n"
         + (f"Events shipped by earlier waves — the screens to connect, NOT "
-           f"behaviour to respecify:\n{json.dumps(events, indent=1)[:20000]}\n\n"
+           f"behaviour to respecify:\n{json.dumps(events, indent=1)}\n\n"
            if horizontal else
-           f"Full board events for this slice:\n{json.dumps(events, indent=1)[:20000]}\n\n")
+           f"Full board events for this slice:\n{json.dumps(events, indent=1)}\n\n")
         + extras
         + "Requirements:\n"
         "  * slice.id / wave / bounded_context must match the plan exactly; "
