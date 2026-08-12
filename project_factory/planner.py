@@ -595,6 +595,183 @@ def _validate_assumptions(text: str, pending: list[dict]) -> list[str]:
 
 
 # -----------------------------------------------------------------------------
+# Agent 1.6: the schema architect (project data backbone)
+# -----------------------------------------------------------------------------
+_BACKBONE_CARDINALITIES = {"one_to_one", "one_to_many", "many_to_many"}
+_BACKBONE_DELETES = {"cascade", "restrict", "set_null"}
+
+
+def backbone_path(project: cfgmod.Project) -> pathlib.Path:
+    return project.dir / "specs" / "data-backbone.yaml"
+
+
+def load_backbone(project: cfgmod.Project) -> str | None:
+    p = backbone_path(project)
+    return p.read_text() if p.exists() else None
+
+
+def draft_backbone(project: cfgmod.Project, *, usage: Usage | None = None,
+                   budget_usd: float | None = None,
+                   log_path: pathlib.Path | None = None) -> pathlib.Path:
+    """
+    Draft specs/data-backbone.yaml once per project, after plan approval and
+    the assumptions register: the ENTITY-LEVEL data model — entities, business
+    keys, relations (cardinality + delete semantics) and the slice that OWNS
+    each entity. Deliberately NOT columns, enums, indexes or constraints:
+    those stay slice-owned, decided when the slice's scenarios exist, because
+    the schema's best decisions are often deliberate non-decisions pending
+    client answers (barcode-v2: no unique on ScanEvent while duplicate-scan
+    semantics were an open question).
+
+    Rationale: without this, cross-slice data decisions are made by whichever
+    slice moves first, and every later add-a-back-relation forces a wholesale
+    model redeclaration. Falls under the plan gate's accountability umbrella.
+    Never overwrites an existing file — hand-author it before the run to keep
+    full control.
+    """
+    target = backbone_path(project)
+    if target.exists():
+        return target
+
+    plan = load_plan(project) or {}
+    board = cfgmod.load_board(project.board_path)
+    in_scope, _ = _board_events(board)
+    slice_ids = [s["id"] for s in plan.get("slices", [])]
+    owned = {eid for s in plan.get("slices", [])
+             for eid in (s.get("event_ids") or [])}
+    events = [_digest_event(e) for e in in_scope if e["id"] in owned]
+    forbidden = _forbidden_capabilities(board)
+
+    extras = ""
+    if plan.get("hard_constraints"):
+        extras += ("HARD CONSTRAINTS (engagement-wide, non-negotiable):\n"
+                   f"{json.dumps(plan['hard_constraints'], indent=1)}\n\n")
+    assumptions = load_assumptions(project)
+    if assumptions:
+        extras += ("APPROVED WORKING ASSUMPTIONS — each is a decided fact; "
+                   "the backbone must be consistent with them:\n"
+                   + yaml.safe_dump(
+                       {"working_assumptions":
+                        assumptions.get("working_assumptions", [])},
+                       sort_keys=False, allow_unicode=True) + "\n")
+    if forbidden:
+        names = [f"{f['name']} ({f['id']})" for f in forbidden]
+        extras += ("DELIBERATELY UNPRICED capabilities — model NO entity, "
+                   f"relation or read model that exists to serve these: "
+                   f"{names}\n\n")
+
+    prompt = (
+        "You are the SCHEMA ARCHITECT for a whole project that will be built "
+        "in vertical slices, one wave at a time, by agents who each see only "
+        "their own slice. Draft the project's DATA BACKBONE: the one "
+        "entity-level data model every slice must build against.\n\n"
+        "Decide ONLY:\n"
+        "  * the entities (PascalCase Prisma model names) and one-sentence "
+        "purposes;\n"
+        "  * each entity's business key (the identifier users see), or null;\n"
+        "  * every relation between entities — including relations a LATER "
+        "wave will need: declaring them now is the whole point;\n"
+        "  * which plan slice OWNS each entity (the slice that first creates "
+        "its table — the earliest wave that needs it);\n"
+        "  * read models: derived projections a slice recomputes from owned "
+        "entities, with their sources.\n\n"
+        "Do NOT decide columns, enums, indexes, or uniqueness/constraints — "
+        "those belong to the owning slice, when its scenarios exist. Where an "
+        "OPEN QUESTION would decide a relation, follow the assumptions "
+        "register; never resolve a question the register leaves open.\n"
+        "Model nothing for deferred/unpriced capabilities or parked events.\n\n"
+        f"The approved plan's slices (wave order):\n"
+        f"{json.dumps([{k: s.get(k) for k in ('id', 'name', 'wave', 'bounded_context', 'event_ids')} for s in plan.get('slices', [])], indent=1)}\n\n"
+        f"In-scope board events:\n{json.dumps(events, indent=1)}\n\n"
+        + extras +
+        "Return ONLY YAML in exactly this shape (no fences, no commentary):\n"
+        "entities:\n"
+        "  - name: <PascalCase>\n"
+        "    purpose: <one sentence>\n"
+        "    owned_by: <slice id from the plan>\n"
+        "    business_key: <fieldName or null>\n"
+        "    relations:\n"
+        "      - to: <entity name>\n"
+        "        cardinality: one_to_one | one_to_many | many_to_many\n"
+        "        on_parent_delete: cascade | restrict | set_null\n"
+        "read_models:\n"
+        "  - name: <PascalCase>\n"
+        "    purpose: <one sentence>\n"
+        "    owned_by: <slice id>\n"
+        "    derived_from: [<entity names>]\n"
+    )
+
+    errors: list[str] = []
+    text = ""
+    for attempt in range(2):
+        out = claude(
+            "schema_architect",
+            prompt if not errors
+            else prompt + "\n\nYour previous draft failed validation — fix "
+                          "exactly these and return the full YAML again:\n  "
+                          + "\n  ".join(errors),
+            attempt=attempt, usage=usage, budget_usd=budget_usd,
+            log_path=log_path)
+        text = _strip_fences(out)
+        errors = _validate_backbone(text, slice_ids)
+        if not errors:
+            break
+    if errors:
+        raise PlanError("data backbone failed validation after 2 attempts:\n  "
+                        + "\n  ".join(errors))
+
+    target.write_text(
+        "# DATA BACKBONE — drafted by the factory's schema_architect after plan\n"
+        "# approval. Entities, business keys, relations and slice ownership are\n"
+        "# decided HERE, once, project-wide. Columns, enums, indexes and\n"
+        "# constraints stay slice-owned. Falls under the project plan gate's\n"
+        "# accountability; edit freely before the first slice runs.\n\n"
+        + text.strip() + "\n")
+    return target
+
+
+def _validate_backbone(text: str, slice_ids: list[str]) -> list[str]:
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        return [f"not valid YAML: {e}"]
+    if not isinstance(data, dict) or not isinstance(data.get("entities"), list) \
+            or not data["entities"]:
+        return ["missing or empty top-level entities list"]
+    errors: list[str] = []
+    entity_names = {e.get("name") for e in data["entities"]
+                    if isinstance(e, dict)}
+    declared = entity_names | {r.get("name")
+                               for r in data.get("read_models") or []
+                               if isinstance(r, dict)}
+    for e in data["entities"]:
+        name = e.get("name") or "?"
+        if not re.fullmatch(r"[A-Z][A-Za-z0-9]*", str(name)):
+            errors.append(f"{name}: entity name must be a PascalCase word")
+        if slice_ids and e.get("owned_by") not in slice_ids:
+            errors.append(f"{name}: owned_by {e.get('owned_by')!r} is not a "
+                          "slice id from the plan")
+        for rel in e.get("relations") or []:
+            if rel.get("to") not in declared:
+                errors.append(f"{name}: relation to undeclared entity "
+                              f"{rel.get('to')!r}")
+            if rel.get("cardinality") not in _BACKBONE_CARDINALITIES:
+                errors.append(f"{name}: bad cardinality {rel.get('cardinality')!r}")
+            if rel.get("on_parent_delete") not in _BACKBONE_DELETES:
+                errors.append(f"{name}: bad on_parent_delete "
+                              f"{rel.get('on_parent_delete')!r}")
+    for r in data.get("read_models") or []:
+        name = r.get("name") or "?"
+        if slice_ids and r.get("owned_by") not in slice_ids:
+            errors.append(f"{name}: owned_by {r.get('owned_by')!r} is not a "
+                          "slice id from the plan")
+        for src in r.get("derived_from") or []:
+            if src not in entity_names:
+                errors.append(f"{name}: derived_from unknown entity {src!r}")
+    return errors
+
+
+# -----------------------------------------------------------------------------
 # Agent 2: the oracle author
 # -----------------------------------------------------------------------------
 def scenarios_path_for(project: cfgmod.Project, slice_id: str) -> pathlib.Path:
@@ -662,6 +839,16 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
                        {"working_assumptions":
                         assumptions.get("working_assumptions", [])},
                        sort_keys=False, allow_unicode=True) + "\n")
+    backbone = load_backbone(project)
+    if backbone:
+        extras += (
+            "PROJECT DATA BACKBONE (project-wide contract, drafted once after "
+            "plan approval — BINDING): entity names, business keys, relations "
+            "and slice ownership are decided here. Use these entity names; an "
+            "entity OWNED by an earlier wave is data your scenarios set up in "
+            "given, never behaviour to respecify. Columns and constraints "
+            "beyond this remain the slice's to decide:\n"
+            f"```yaml\n{backbone}\n```\n\n")
     # The DELIVERED seed is a cross-slice contract. Wave 2's oracle pinned
     # john.doe as Operator across 12 frozen call sites; wave 3's oracle named
     # the same address as Admin, and the only ways to satisfy both were to

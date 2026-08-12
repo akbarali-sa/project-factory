@@ -47,6 +47,18 @@ seconds:
   GATE C per slice. This is a deliberate trade; for a slice where correctness
   is subtle, hand-author its scenarios file BEFORE run-project reaches it —
   an existing file is never overwritten.
+* **A project-wide DATA BACKBONE is drafted once, after plan approval**
+  (`schema_architect`, Opus → `specs/data-backbone.yaml`): entities, business
+  keys, relations and the OWNING slice — never columns, enums, indexes or
+  constraints, which stay slice-owned. It is injected into every oracle draft
+  and every slice architect, so cross-slice data decisions stop being made by
+  whichever slice moves first (see vault: cross-slice seed contract lesson,
+  project #2). Like
+  the oracle: an existing file is never overwritten — hand-author it before
+  the run to keep full control, and edit it freely before the first slice.
+  Relatedly, `check_contract` now rejects a redeclared model/enum that DROPS
+  an existing field or value (a silent destructive migration; redeclarations
+  may only add).
 * **Gate policy defaults to auto A+B, human C**
   (`config.PROJECT_GATE_POLICY`). Override per run with
   `--gates spec=human,contract=human` or persistently via `"gates"` in

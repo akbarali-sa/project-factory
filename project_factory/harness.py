@@ -257,6 +257,52 @@ def splice_schema(existing: str, new_models: str) -> str:
     return existing
 
 
+def _block_member_names(block: str) -> set[str]:
+    """Field names of a model block / value names of an enum block: the first
+    word of every body line that isn't a comment, an attribute (@@…) or a
+    brace. Doc-comments (///) and block attributes are deliberately excluded —
+    they may change freely on redeclaration."""
+    names: set[str] = set()
+    for line in block.splitlines()[1:]:
+        line = line.strip()
+        if not line or line.startswith(("//", "@@", "{", "}")):
+            continue
+        if m := re.match(r"(\w+)", line):
+            names.add(m.group(1))
+    return names
+
+
+def redeclaration_drops(existing: str, new_models: str) -> list[str]:
+    """
+    Redeclare-to-modify is wholesale replacement (splice_schema), so a
+    redeclared model/enum that omits an existing field silently deletes it —
+    a destructive migration that no later check catches, because the spliced
+    schema still validates. barcode-v2 redeclared `User` and `Container` in
+    full three times; one dropped line there would have deleted a prior
+    wave's column. Additions are fine; only DROPS are errors.
+    """
+    errors: list[str] = []
+    for block in re.split(r"\n(?=model |enum )", new_models.strip()):
+        block = block.strip()
+        name = re.match(r"(model|enum)\s+(\w+)", block)
+        if not name:
+            continue
+        old = re.search(
+            rf"^(?:model|enum)\s+{name.group(2)}\b[^\n]*\{{.*?\n\}}",
+            existing, re.M | re.S)
+        if not old:
+            continue
+        if dropped := sorted(_block_member_names(old.group(0))
+                             - _block_member_names(block)):
+            errors.append(
+                f"redeclaration of {name.group(1)} {name.group(2)} drops "
+                f"existing member(s) {dropped} — a redeclared block replaces "
+                "the original wholesale, so every existing field/value must "
+                "be reproduced (rename/remove is a destructive migration and "
+                "needs a human)")
+    return errors
+
+
 _NEGATED_BEFORE_CODE = re.compile(
     r"\b(?:not|never|rather than|instead of)\b[^.;]{0,16}$", re.I)
 
@@ -330,7 +376,12 @@ def check_contract(contract: str, scenarios: dict, repo: str) -> Result:
     # aggregates that already live in the repo's schema.
     base = pathlib.Path(repo) / "apps/api/prisma/schema.prisma"
     if base.exists():
-        merged = splice_schema(base.read_text(), prisma.group(1))
+        base_text = base.read_text()
+        merged = splice_schema(base_text, prisma.group(1))
+        # 4d. redeclare-to-modify may only ADD: a redeclaration that drops an
+        # existing field/enum value is a silent destructive migration the
+        # spliced schema would happily validate.
+        errors.extend(redeclaration_drops(base_text, prisma.group(1)))
     else:
         # No repo schema yet (unit tests, dry validation): fall back to the
         # contract block alone, which then must be self-contained.

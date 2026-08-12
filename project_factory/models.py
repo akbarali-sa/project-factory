@@ -83,6 +83,14 @@ AGENT_TIER: dict[str, str] = {
     # assumption is a decision the oracle then builds on — wrong-but-recorded
     # beats implicit-and-scattered, so this is Opus-grade reasoning.
     "assumptions_author": "opus",
+
+    # Drafts the project-wide DATA BACKBONE (specs/data-backbone.yaml) once,
+    # after plan approval: entities, business keys, relations and the owning
+    # slice — never columns or constraints, which stay slice-owned. Exists
+    # because cross-slice data decisions otherwise get made by whichever
+    # slice moves first (barcode-v2's expectedItemCounts JSON), and every
+    # add-a-back-relation forces a risky wholesale model redeclaration.
+    "schema_architect": "opus",
 }
 
 # Escalate the Implementer after repeated failure: cheap first, expensive only

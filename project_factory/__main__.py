@@ -739,6 +739,26 @@ def _cmd_run_project(args) -> int:
             return 1
         print(f"assumptions register: {planmod.assumptions_path(project).name}")
 
+    # ---- phase 1.6: the data backbone (once, before any oracle) -------------
+    # Entity-level data model for the WHOLE project — entities, keys,
+    # relations, owning slice — so cross-slice data decisions aren't made by
+    # whichever slice moves first. Columns/constraints stay slice-owned.
+    # Hand-author specs/data-backbone.yaml before running to keep full control.
+    if not planmod.backbone_path(project).exists():
+        spent = project.spent_usd()
+        print(f"\ndrafting project data backbone "
+              f"(schema_architect, opus, ${project_budget - spent:.2f} remaining)…")
+        try:
+            planmod.draft_backbone(
+                project, budget_usd=project_budget - spent,
+                log_path=livelog.path_for(str(project.dir), "project"))
+        except RateLimited as e:
+            return _report_rate_limited(e, args.slug, None)
+        except planmod.PlanError as e:
+            print(f"\ndata backbone draft failed: {e}", file=sys.stderr)
+            return 1
+        print(f"data backbone: {planmod.backbone_path(project).name}")
+
     print()
     print(infra.preflight())
 

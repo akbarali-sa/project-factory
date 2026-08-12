@@ -293,6 +293,19 @@ def architect(state: S) -> dict:
     sc = state["scenarios"]
     ids = {t for s in sc["scenarios"] for t in s["traces_to"]}
     relevant = [e for e in state["ir"]["events"] if e["id"] in ids]
+    # Read at node runtime, not carried in state: keeps old checkpoints
+    # resumable, and slice-mode projects without a backbone simply skip it.
+    backbone_file = (pathlib.Path(state["project_dir"]) / "specs"
+                     / "data-backbone.yaml")
+    backbone = (
+        "PROJECT DATA BACKBONE — the project-wide entity contract (entities, "
+        "business keys, relations, delete semantics, owning slice), decided "
+        "once after plan approval. BINDING for names, keys and relations; "
+        "columns, enums, indexes and constraints are yours to design. Declare "
+        "only what this slice owns, plus redeclarations needed to add a "
+        "relation the backbone already lists:\n"
+        f"```yaml\n{backbone_file.read_text()}\n```\n\n"
+    ) if backbone_file.exists() else ""
     out = claude(
         "architect",
         "Design the data + API contract for ONE vertical slice of an existing "
@@ -306,7 +319,10 @@ def architect(state: S) -> dict:
         "redeclare the ENTIRE model with your change applied. Never describe "
         "a change in comments or diff notation: the splice is literal, "
         "`prisma validate` runs on the result, and a commented-out change "
-        "leaves every relation that depends on it dangling.\n\n"
+        "leaves every relation that depends on it dangling. A redeclaration "
+        "must reproduce every existing field of the model — dropping one is "
+        "a silent destructive migration and fails validation.\n\n"
+        + backbone +
         f"Aggregates: {sc['aggregates']}\n\n"
         f"Domain events:\n{json.dumps(relevant, indent=1)}\n\n"
         f"API scenarios the contract must satisfy:\n"
