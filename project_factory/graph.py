@@ -523,6 +523,20 @@ def write_tests(state: S) -> dict:
 # =============================================================================
 # 7. Implement / verify / diagnose — one helper, three phases
 # =============================================================================
+# Navigation economics for sandboxed agents: they cannot run commands, so
+# exploration happens by Reading files — and reading whole sources to FIND
+# things is the expensive pattern. The repo ships an AST-derived index
+# (graft/) precisely so a Read of one small card replaces several full-file
+# reads. One shared nudge, injected into the readers that explore most.
+_GRAFT_NUDGE = (
+    "NAVIGATION — the repo contains graft/: INDEX.md plus one markdown card "
+    "per source file (same path, .md suffix) listing every symbol's purpose "
+    "and exact file:line span. To find or understand code, Read the card "
+    "first and open the source only at the named span; do not read whole "
+    "source files to search for things.\n\n"
+)
+
+
 def _implement(state: S, phase: str, scope: list[str], instruction: str) -> dict:
     n = state["attempts"].get(phase, 0)
     fix = ""
@@ -540,6 +554,7 @@ def _implement(state: S, phase: str, scope: list[str], instruction: str) -> dict
         "The tests are the specification and are READ-ONLY. Never edit, delete "
         "or skip a test. Follow AGENTS.md and the repo skills. Match the "
         "existing reference module's structure.\n\n"
+        + _GRAFT_NUDGE +
         # Paid for on barcode-v2: the Implementer wrote the single most
         # idiomatic TS Result type, the pre-commit typecheck rejected it, and
         # two Opus diagnosticians ($10.52) reasoned about "type errors" that
@@ -643,6 +658,7 @@ def _diagnose(state: S, phase: str) -> dict:
         "A generated slice fails its tests. Identify the root cause and give a "
         "specific, minimal fix naming files and changes. Do not restate the "
         "error. Never suggest changing the tests.\n\n"
+        + _GRAFT_NUDGE +
         # A digest, not the raw log: the suite runs every spec across four
         # browser projects, so one root cause arrives four times verbatim.
         # Slice 3's diagnostician read 80 copies of a single dead web server
