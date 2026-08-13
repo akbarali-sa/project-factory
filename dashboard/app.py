@@ -326,12 +326,21 @@ def _status_payload(slug: str, slice_id: str) -> dict:
         "completed": completed,
         "process": process_state,
         "cost_usd": round(getattr(usage, "cost_usd", 0.0) or 0.0, 3) if usage else 0.0,
+        # Max-merge the checkpoint counters with state.json's slice_tokens
+        # (transcript backfill / prior generations): the checkpoint is a
+        # floor — a crashed node loses its update — so serve the larger.
         "tokens": {
-            "input": getattr(usage, "input_tokens", 0) or 0,
-            "output": getattr(usage, "output_tokens", 0) or 0,
-            "cache_read": getattr(usage, "cache_read_tokens", 0) or 0,
-            "cache_write": getattr(usage, "cache_write_tokens", 0) or 0,
-        } if usage else None,
+            k: max(
+                int({"input": getattr(usage, "input_tokens", 0) or 0,
+                     "output": getattr(usage, "output_tokens", 0) or 0,
+                     "cache_read": getattr(usage, "cache_read_tokens", 0) or 0,
+                     "cache_write": getattr(usage, "cache_write_tokens", 0) or 0,
+                     }[k] if usage else 0),
+                int((project.state.get("slice_tokens", {}) or {})
+                    .get(slice_id, {}).get(k, 0)),
+            )
+            for k in ("input", "output", "cache_read", "cache_write")
+        },
         "cost_by_agent": {k: round(v, 3) for k, v in (getattr(usage, "by_agent", None) or {}).items()},
         "budget_usd": project.cfg.get("budget_usd", 25.0),
         "progress_pct": round(done_count / len(phases) * 100),

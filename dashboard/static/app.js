@@ -499,7 +499,11 @@ function renderDetail(d) {
   document.getElementById('progress-bar').style.width = d.progress_pct + '%';
 
   document.getElementById('cost-stat').textContent = '$' + d.cost_usd.toFixed(2);
-  document.getElementById('cost-meta').textContent = `of $${d.budget_usd} budget`;
+  const tk = d.tokens;
+  const fmtTok = (n) => n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(0) + 'K' : String(n);
+  document.getElementById('cost-meta').textContent = tk && (tk.output || tk.cache_read)
+    ? `of $${d.budget_usd} · ${fmtTok(tk.output)} out · ${fmtTok(tk.cache_read)} cache-read tokens`
+    : `of $${d.budget_usd} budget`;
   const costPct = Math.min(d.cost_usd / d.budget_usd * 100, 100);
   const costBar = document.getElementById('cost-bar');
   costBar.style.width = costPct + '%';
