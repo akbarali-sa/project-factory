@@ -367,13 +367,23 @@ class Project:
         self._write_state()
 
     # -- project-level accounting (run-project) ------------------------------
-    def record_slice_cost(self, slice_id: str, usd: float) -> None:
+    def record_slice_cost(self, slice_id: str, usd: float,
+                          tokens: dict | None = None) -> None:
         """Ground-truth cost per delivered slice. Callers should prefer the
         live-log sum over the checkpoint counter — a node that crashes loses
-        its usage update, so the checkpoint is a floor, not a total."""
+        its usage update, so the checkpoint is a floor, not a total.
+
+        `tokens` (optional) records the checkpoint Usage's token counters
+        under slice_tokens — same floor-not-total caveat as cost."""
         costs = dict(self.state.get("slice_costs", {}))
         costs[slice_id] = round(max(usd, costs.get(slice_id, 0.0)), 2)
         self.state["slice_costs"] = costs
+        if tokens:
+            all_tokens = dict(self.state.get("slice_tokens", {}))
+            prev = all_tokens.get(slice_id, {})
+            all_tokens[slice_id] = {k: max(int(v), int(prev.get(k, 0)))
+                                    for k, v in tokens.items()}
+            self.state["slice_tokens"] = all_tokens
         self._write_state()
 
     def spent_usd(self) -> float:

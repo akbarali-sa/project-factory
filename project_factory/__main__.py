@@ -90,6 +90,11 @@ def _report(res: dict, project, chosen) -> int:
     cost = f"${usage.cost_usd:.2f}" if usage else "n/a"
     status = res.get("status")
     print(f"\nstatus={status} parked={res.get('parked', [])} cost={cost}")
+    if usage and usage.total_tokens:
+        print(f"tokens: out={usage.output_tokens:,} in={usage.input_tokens:,} "
+              f"cache_read={usage.cache_read_tokens:,} "
+              f"cache_write={usage.cache_write_tokens:,} "
+              f"(total {usage.total_tokens:,})")
     if usage and usage.by_agent:
         print("cost by agent: "
               + json.dumps({k: round(v, 3) for k, v in usage.by_agent.items()}))
@@ -101,7 +106,13 @@ def _report(res: dict, project, chosen) -> int:
     if usage:
         truth = max(truth, round(usage.cost_usd, 2))
     if truth:
-        project.record_slice_cost(chosen.id, truth)
+        project.record_slice_cost(
+            chosen.id, truth,
+            tokens={"input": usage.input_tokens,
+                    "output": usage.output_tokens,
+                    "cache_read": usage.cache_read_tokens,
+                    "cache_write": usage.cache_write_tokens}
+            if usage and usage.total_tokens else None)
 
     # A Gate C approval on a PARKED slice is the human override — someone
     # reviewed the branch (typically after hand-fixing the parked phase) and

@@ -326,6 +326,12 @@ def _status_payload(slug: str, slice_id: str) -> dict:
         "completed": completed,
         "process": process_state,
         "cost_usd": round(getattr(usage, "cost_usd", 0.0) or 0.0, 3) if usage else 0.0,
+        "tokens": {
+            "input": getattr(usage, "input_tokens", 0) or 0,
+            "output": getattr(usage, "output_tokens", 0) or 0,
+            "cache_read": getattr(usage, "cache_read_tokens", 0) or 0,
+            "cache_write": getattr(usage, "cache_write_tokens", 0) or 0,
+        } if usage else None,
         "cost_by_agent": {k: round(v, 3) for k, v in (getattr(usage, "by_agent", None) or {}).items()},
         "budget_usd": project.cfg.get("budget_usd", 25.0),
         "progress_pct": round(done_count / len(phases) * 100),

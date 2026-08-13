@@ -120,11 +120,19 @@ def model_for(agent: str, attempt: int = 0) -> str:
 
 @dataclass
 class Usage:
-    """Accumulated spend for one graph run. Lives in LangGraph state."""
+    """Accumulated spend for one graph run. Lives in LangGraph state.
+
+    Token fields default to 0 so checkpoints written before they existed
+    deserialize cleanly; totals resumed from such checkpoints undercount
+    exactly like cost does (live log / transcripts are ground truth)."""
     cost_usd: float = 0.0
     turns: int = 0
     duration_ms: int = 0
     by_agent: dict[str, float] = field(default_factory=dict)
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
     def add(self, agent: str, payload: dict) -> None:
         c = float(payload.get("total_cost_usd") or 0.0)
@@ -132,6 +140,16 @@ class Usage:
         self.turns += int(payload.get("num_turns") or 0)
         self.duration_ms += int(payload.get("duration_ms") or 0)
         self.by_agent[agent] = self.by_agent.get(agent, 0.0) + c
+        u = payload.get("usage") or {}
+        self.input_tokens += int(u.get("input_tokens") or 0)
+        self.output_tokens += int(u.get("output_tokens") or 0)
+        self.cache_read_tokens += int(u.get("cache_read_input_tokens") or 0)
+        self.cache_write_tokens += int(u.get("cache_creation_input_tokens") or 0)
+
+    @property
+    def total_tokens(self) -> int:
+        return (self.input_tokens + self.output_tokens
+                + self.cache_read_tokens + self.cache_write_tokens)
 
 
 class BudgetExceeded(RuntimeError):
