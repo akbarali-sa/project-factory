@@ -6,12 +6,6 @@
       "runtimeExecutable": ".venv/bin/uvicorn",
       "runtimeArgs": ["dashboard.app:app", "--port", "8420"],
       "port": 8420
-    },
-    {
-      "name": "trueverz-ui-storybook",
-      "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--dir", "/Users/phaedra182/Documents/repos/turborepo-starter-kit/packages/ui", "storybook"],
-      "port": 6006
     }
   ]
 }
