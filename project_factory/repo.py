@@ -157,6 +157,30 @@ def create_branch(repo: str, branch: str) -> None:
         _run(["git", "switch", branch], cwd=repo)
 
 
+def _exclude_graft(repo: str) -> None:
+    """
+    Keep the graph out of the client deliverable.
+
+    The index is regenerable build output, not source — the factory gitignores
+    its own `graft/` for the same reason. It matters more here: every commit
+    helper stages with `git add -A`, so an index left untracked in the worktree
+    is swept into the NEXT slice's spec commit and ships inside the client's
+    PR diff. Written to .git/info/exclude rather than .gitignore so the
+    deliverable's own ignore file stays exactly as the starter shipped it.
+    """
+    exclude = pathlib.Path(repo) / ".git" / "info" / "exclude"
+    if not exclude.parent.is_dir():
+        return
+    body = exclude.read_text() if exclude.exists() else ""
+    if "graft/" in body:
+        return
+    if body and not body.endswith("\n"):
+        body += "\n"
+    exclude.write_text(
+        body + "# project-factory: regenerable code graph, "
+               "never part of the deliverable.\ngraft/\n")
+
+
 def index_with_graft(repo: str) -> str:
     """
     Build/refresh the generated repo's graft graph.
@@ -169,6 +193,7 @@ def index_with_graft(repo: str) -> str:
     """
     if shutil.which("graft") is None:
         return "graft not installed — skipping index"
+    _exclude_graft(repo)
     p = _run(["graft", "build", "."], cwd=repo, timeout=600, check=False)
     if p.returncode != 0:
         return f"graft index skipped: {(p.stdout + p.stderr).strip()[-160:]}"

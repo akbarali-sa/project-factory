@@ -214,9 +214,17 @@ def clone_starter(state: S) -> dict:
         repo_path=state["repo_path"],
         fresh=cfg.get("fresh_clone", True),
     )
+    # Index HERE, not just at finish: every reader from `architect` onward is
+    # told (_GRAFT_NUDGE) that the repo carries a graft/ card per source file.
+    # Indexing only at finish made that promise false for the whole of slice 1
+    # — agents followed it to a directory that did not exist yet and fell back
+    # to reading whole starter sources, which is the cost the nudge exists to
+    # avoid. Free, offline, and best-effort: it cannot fail the clone.
+    graft_note = repo_mod.index_with_graft(state["repo_path"])
     return {"starter_sha": info.starter_sha,
             "log": [f"clone: {cfg['starter_url']}@{info.starter_ref} "
-                    f"({info.starter_sha[:8]}) -> {info.path}"]}
+                    f"({info.starter_sha[:8]}) -> {info.path}",
+                    f"graft: {graft_note}"]}
 
 
 # =============================================================================
