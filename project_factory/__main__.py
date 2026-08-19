@@ -553,9 +553,11 @@ def _parse_gates(spec: str | None) -> dict | None:
     gates = {}
     for part in spec.split(","):
         k, _, v = part.strip().partition("=")
-        if k not in ("spec", "contract", "pr") or v not in ("auto", "human"):
+        if k not in ("spec", "contract", "pr", "decisions", "uiux") \
+                or v not in ("auto", "human"):
             raise SystemExit(f"bad --gates entry '{part}' "
-                             "(want spec|contract|pr=auto|human)")
+                             "(want spec|contract|pr|decisions|uiux"
+                             "=auto|human)")
         gates[k] = v
     return gates
 
@@ -732,10 +734,56 @@ def _cmd_run_project(args) -> int:
         print("\n--dry-run: nothing executed")
         return 0
 
+    # ---- phase 1.4: the decision register (project-level gate) --------------
+    # Every question the build needs answered, in git, with who answered it.
+    # Board questions import deterministically; the analyst agent adds the
+    # ones nobody recorded. With gates.decisions=human the run holds while
+    # any `blocker: start` question is open — answering and deferring are
+    # both explicit human decisions and both unblock.
+    from . import decisions as decmod
+
+    decs = decmod.load_decisions(project)
+    if decs is None:
+        decs = decmod.import_board_questions(project)
+        print(f"\ndecision register: {decmod.stats(decs)['total']} question(s) "
+              f"imported from the board → {decmod.decisions_path(project).name}")
+    if not decs.get("analyst_done"):
+        spent = project.spent_usd()
+        print(f"\nraising unrecorded questions "
+              f"(decision_analyst, opus, ${project_budget - spent:.2f} remaining)…")
+        try:
+            decs = decmod.draft_analyst_questions(
+                project, budget_usd=project_budget - spent,
+                log_path=livelog.path_for(str(project.dir), "project"))
+        except RateLimited as e:
+            return _report_rate_limited(e, args.slug, None)
+        except decmod.DecisionError as e:
+            print(f"\nanalyst questions failed: {e}", file=sys.stderr)
+            return 1
+        st = decmod.stats(decs)
+        print(f"register now holds {st['total']} question(s), "
+              f"{st['open_start_blockers']} open start-blocker(s)")
+
+    if gates.get("decisions", "human") == "human":
+        blockers = decmod.open_start_blockers(decs)
+        if blockers:
+            print(f"\nTHE DECISION REGISTER IS A PROJECT-LEVEL GATE — "
+                  f"{len(blockers)} start-blocker(s) open:")
+            for q in blockers:
+                print(f"  [{q['id']}] {q['question']}")
+                if q.get("recommended"):
+                    print(f"        recommended: {q['recommended']}")
+            print(f"\nAnswer or defer them (deferring records a working "
+                  f"assumption):\n"
+                  f"  dashboard: /p/{args.slug}/decisions\n"
+                  f"  cli:       python -m project_factory decide {args.slug} "
+                  f"<id> --by <you> --answer \"…\"  (or --defer)")
+            return HUMAN_ACTION_NEEDED
+
     # ---- phase 1.5: the assumptions register (once, before any oracle) ------
-    # Only when a reviewed backlog drove the plan: its pending questions are
-    # structured, and the oracle author consumes the register on every slice.
-    if project.backlog_path and not planmod.assumptions_path(project).exists():
+    # The decision register (or a reviewed backlog) supplies structured
+    # questions; the oracle author consumes this register on every slice.
+    if not planmod.assumptions_path(project).exists():
         spent = project.spent_usd()
         print(f"\ndrafting working-assumptions register "
               f"(assumptions_author, opus, ${project_budget - spent:.2f} remaining)…")
@@ -769,6 +817,39 @@ def _cmd_run_project(args) -> int:
             print(f"\ndata backbone draft failed: {e}", file=sys.stderr)
             return 1
         print(f"data backbone: {planmod.backbone_path(project).name}")
+
+    # ---- phase 1.7: UI/UX preview (project-level gate) -----------------------
+    # Render what the product will feel like — tokens, primitives, low-fi
+    # screens — BEFORE slice work, and hold for human approval. With
+    # gates.uiux=auto the phase is skipped outright: a preview nobody
+    # reviews is pure spend.
+    if gates.get("uiux", "human") == "human":
+        from . import uiux as uiuxmod
+
+        if not uiuxmod.preview_path(project).exists():
+            spent = project.spent_usd()
+            print(f"\ndrafting UI/UX preview "
+                  f"(uiux_previewer, opus, ${project_budget - spent:.2f} remaining)…")
+            try:
+                uiuxmod.draft_preview(
+                    project, budget_usd=project_budget - spent,
+                    log_path=livelog.path_for(str(project.dir), "project"))
+            except RateLimited as e:
+                return _report_rate_limited(e, args.slug, None)
+            except uiuxmod.UiuxError as e:
+                print(f"\nUI/UX preview failed: {e}", file=sys.stderr)
+                return 1
+            print(f"preview: {uiuxmod.preview_path(project)}")
+        if not uiuxmod.is_approved(project):
+            print(f"\nTHE UI/UX PREVIEW IS A PROJECT-LEVEL GATE. Review it:\n"
+                  f"  dashboard: /p/{args.slug}/uiux\n"
+                  f"  file:      {uiuxmod.preview_path(project)}\n"
+                  f"then either approve:\n"
+                  f"  python -m project_factory approve-uiux {args.slug} --by <you>\n"
+                  f"or demand a redraw (records the note, drops the preview):\n"
+                  f"  python -m project_factory approve-uiux {args.slug} "
+                  f"--by <you> --redraw \"<what must change>\"")
+            return HUMAN_ACTION_NEEDED
 
     print()
     print(infra.preflight())
@@ -865,6 +946,79 @@ def _cmd_approve_plan(args) -> int:
     return 0
 
 
+def _cmd_approve_uiux(args) -> int:
+    from . import uiux as uiuxmod
+    try:
+        project = cfgmod.discover(args.slug, args.workspace)
+    except cfgmod.ConfigError as e:
+        print(f"config error:\n{e}", file=sys.stderr)
+        return 2
+    if not args.by:
+        print("--by <name> is required: the UI/UX gate must be attributable",
+              file=sys.stderr)
+        return 2
+    try:
+        if args.redraw:
+            uiuxmod.invalidate(project, by=args.by, note=args.redraw)
+            print("redraw recorded — the preview was dropped; the next "
+                  f"run-project regenerates it:\n"
+                  f"  python -m project_factory run-project {args.slug}")
+            return 0
+        uiuxmod.approve(project, args.by)
+    except uiuxmod.UiuxError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    print(f"UI/UX approved by {args.by}. Continue: "
+          f"python -m project_factory run-project {args.slug}")
+    return 0
+
+
+def _cmd_decide(args) -> int:
+    """Record one decision on the register (answer, defer, add, or list)."""
+    from . import decisions as decmod
+    try:
+        project = cfgmod.discover(args.slug, args.workspace)
+    except cfgmod.ConfigError as e:
+        print(f"config error:\n{e}", file=sys.stderr)
+        return 2
+
+    if not args.qid and not args.add:      # list mode
+        data = decmod.load_decisions(project)
+        if not data:
+            print("no decision register yet — run run-project first")
+            return 0
+        st = decmod.stats(data)
+        print(f"register: {st['answered']} answered, {st['deferred']} "
+              f"deferred, {st['open']} open "
+              f"({st['open_start_blockers']} start-blocker(s))")
+        for q in data.get("questions", []):
+            mark = {"answered": "✓", "deferred": "→"}.get(q["status"], " ")
+            star = "*" if q.get("blocker") == "start" and q["status"] == "open" else " "
+            print(f" {mark}{star}[{q['id']:>4}] {q['question']}")
+            if q.get("answer"):
+                print(f"        = {q['answer']}  ({q['answered_by']})")
+        return 0
+
+    try:
+        if args.add:
+            q = decmod.add_question(
+                project, question=args.add, by=args.by,
+                blocker=args.blocker or "slices")
+            print(f"added [{q['id']}] {q['question']}")
+        else:
+            q = decmod.resolve(project, args.qid, by=args.by,
+                               answer=args.answer, defer=args.defer)
+            print(f"[{q['id']}] {q['status']} by {q['answered_by']}")
+    except decmod.DecisionError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    data = decmod.load_decisions(project)
+    left = decmod.stats(data)["open_start_blockers"]
+    print(f"{left} start-blocker(s) still open"
+          + ("" if left else " — run-project can proceed"))
+    return 0
+
+
 # -----------------------------------------------------------------------------
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="project_factory")
@@ -899,8 +1053,9 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--dry-run", action="store_true",
                     help="print the plan and stop; never spends")
     rp.add_argument("--gates",
-                    help="override gate policy, e.g. spec=human,contract=auto "
-                         "(default: spec=auto,contract=auto,pr=human)")
+                    help="override gate policy, e.g. spec=human,decisions=auto "
+                         "(default: spec=auto,contract=auto,pr=human,"
+                         "decisions=human,uiux=human)")
     rp.add_argument("--max-slices", type=int,
                     help="stop after N completed slices (checkpointing a "
                          "long project into sessions)")
@@ -923,6 +1078,35 @@ def main(argv: list[str] | None = None) -> int:
     apl.add_argument("--by", default="",
                      help="who approved — required, recorded in the plan")
     apl.set_defaults(fn=_cmd_approve_plan)
+
+    dc = sub.add_parser("decide",
+                        help="answer/defer a decision-register question "
+                             "(specs/decisions.yaml); no id lists the register")
+    dc.add_argument("slug")
+    dc.add_argument("qid", nargs="?", help="question id (omit to list)")
+    dc.add_argument("--answer", help="the decision, recorded verbatim")
+    dc.add_argument("--defer", action="store_true",
+                    help="explicitly defer — a working assumption is recorded "
+                         "downstream and the gate unblocks")
+    dc.add_argument("--add", metavar="QUESTION",
+                    help="add a new question to the register instead")
+    dc.add_argument("--blocker",
+                    choices=("start", "wave0", "slices", "completion", "none"),
+                    help="blocker level for --add (default: slices)")
+    dc.add_argument("--by", default="",
+                    help="who decided — required, recorded in the register")
+    dc.set_defaults(fn=_cmd_decide)
+
+    au = sub.add_parser("approve-uiux",
+                        help="approve the UI/UX preview (project-level gate), "
+                             "or --redraw to demand changes")
+    au.add_argument("slug")
+    au.add_argument("--by", default="",
+                    help="who decided — required, recorded in specs/uiux.yaml")
+    au.add_argument("--redraw", metavar="NOTE",
+                    help="reject: record what must change and drop the "
+                         "preview so run-project regenerates it")
+    au.set_defaults(fn=_cmd_approve_uiux)
 
     r = sub.add_parser("run", help="run (or resume) one slice")
     r.add_argument("slug")

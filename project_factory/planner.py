@@ -34,6 +34,7 @@ import yaml
 
 from . import config as cfgmod
 from . import harness
+from . import livelog
 from .models import Usage, claude
 
 PLAN_FILENAME = "project-plan.json"
@@ -144,6 +145,11 @@ def plan_slices(project: cfgmod.Project, *, usage: Usage | None = None,
     in_scope, out_of_scope = _board_events(board)
     digest = [_digest_event(e) for e in in_scope]
 
+    # cwd = the PROJECT dir, deliberately: without it the agent inherits the
+    # factory root as its working directory and explores the factory's own
+    # source instead of the engagement's specs — truev's oracle_author read
+    # planner.py/harness.py to reverse-engineer the validator and listed
+    # OTHER projects' boards (a confidentiality leak between engagements).
     out = claude(
         "planner",
         "Partition a project's business events into VERTICAL SLICES for "
@@ -182,6 +188,7 @@ def plan_slices(project: cfgmod.Project, *, usage: Usage | None = None,
         '"kind": "horizontal", "bounded_context": "...", "event_ids": [], '
         '"rationale": "..."}], '
         '"out_of_scope": [{"id": "be_...", "reason": "..."}]}',
+        cwd=str(project.dir),
         usage=usage, budget_usd=budget_usd, log_path=log_path,
     )
     try:
@@ -474,24 +481,61 @@ def draft_assumptions(project: cfgmod.Project, *, usage: Usage | None = None,
     if target.exists():
         return target
 
-    board = cfgmod.load_board(project.board_path)
-    in_scope, _ = _board_events(board)
-    pending, resolved, seen = [], [], set()
-    for e in in_scope:
-        for q in e.get("questions", []):
-            if q.get("id") in seen:
-                continue
-            seen.add(q.get("id"))
+    # The decision register is the richer source when it exists: it carries
+    # the board's questions PLUS analyst- and human-raised ones, and human
+    # answers recorded there must reach the oracle author verbatim. Fall back
+    # to raw board questions only for pre-register projects.
+    from . import decisions as decmod
+
+    pending, resolved = [], []
+    register = decmod.load_decisions(project)
+    if register:
+        for q in register.get("questions", []):
             if q.get("status") == "answered":
                 resolved.append({
-                    "question_id": q.get("id"), "question": q.get("question"),
+                    "question_id": q["id"], "question": q.get("question"),
                     "answer": q.get("answer"),
-                    "source": "board (recorded answer — imported verbatim)"})
+                    "source": f"decision register — answered by "
+                              f"{q.get('answered_by')} (imported verbatim)"})
             else:
                 pending.append({
-                    "id": q.get("id"), "question": q.get("question"),
-                    "criticality": q.get("criticality", "normal"),
-                    "event_id": e["id"], "event_name": e["name"]})
+                    "id": q["id"], "question": q.get("question"),
+                    "criticality": ("critical" if q.get("blocker") == "start"
+                                    else "normal"),
+                    "event_id": q.get("event_id"),
+                    "event_name": q.get("context")})
+    else:
+        board = cfgmod.load_board(project.board_path)
+        in_scope, _ = _board_events(board)
+        seen: set = set()
+        for e in in_scope:
+            for q in e.get("questions", []):
+                if q.get("id") in seen:
+                    continue
+                seen.add(q.get("id"))
+                if q.get("status") == "answered":
+                    resolved.append({
+                        "question_id": q.get("id"), "question": q.get("question"),
+                        "answer": q.get("answer"),
+                        "source": "board (recorded answer — imported verbatim)"})
+                else:
+                    pending.append({
+                        "id": q.get("id"), "question": q.get("question"),
+                        "criticality": q.get("criticality", "normal"),
+                        "event_id": e["id"], "event_name": e["name"]})
+
+    if not pending:
+        # Every recorded question is answered — nothing to assume. Write the
+        # register with the answers alone; no agent call, no spend.
+        data = {"working_assumptions": [], "resolved": resolved,
+                "drafted_by": "no agent — every question was answered",
+                "note": "All recorded questions carried answers when the "
+                        "register was drafted."}
+        target.write_text(
+            "# ASSUMPTIONS REGISTER — every question was answered; no "
+            "working assumptions were needed.\n\n"
+            + yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+        return target
 
     backlog_ctx = ""
     if project.backlog_path:
@@ -547,12 +591,16 @@ def draft_assumptions(project: cfgmod.Project, *, usage: Usage | None = None,
             else prompt + "\n\nYour previous draft failed validation — fix "
                           "exactly these and return the full YAML again:\n  "
                           + "\n  ".join(errors),
+            cwd=str(project.dir),
             attempt=attempt, usage=usage, budget_usd=budget_usd,
             log_path=log_path)
         text = _strip_fences(out)
         errors = _validate_assumptions(text, pending)
         if not errors:
             break
+        if log_path:
+            livelog.append(log_path, f"assumptions draft attempt {attempt + 1} "
+                           "failed validation: " + "; ".join(errors)[:400])
     if errors:
         raise PlanError("assumptions draft failed validation after 2 "
                         "attempts:\n  " + "\n  ".join(errors))
@@ -659,6 +707,18 @@ def draft_backbone(project: cfgmod.Project, *, usage: Usage | None = None,
         extras += ("DELIBERATELY UNPRICED capabilities — model NO entity, "
                    f"relation or read model that exists to serve these: "
                    f"{names}\n\n")
+    # The starter's schema is not a blank page: its `User` model carries the
+    # whole auth stack. A backbone that names the account entity anything
+    # else (truev drafted `UserAccount`) sends every slice into a collision
+    # the contract validator rejects — the slice architect can't rename the
+    # starter's model, and the oracle faithfully follows the backbone.
+    extras += ("STARTER-KIT EXISTING MODELS — the generated repo starts from "
+               "a starter whose apps/api/prisma/schema.prisma already ships "
+               "the `User` model that the entire auth stack depends on "
+               f"(starter rule: {starter_constraints()['schema_rule'].strip()!r}). "
+               "The account/actor entity in your backbone MUST be the "
+               "starter's `User` — extend it, never model a parallel account "
+               "entity under another name.\n\n")
 
     prompt = (
         "You are the SCHEMA ARCHITECT for a whole project that will be built "
@@ -710,12 +770,16 @@ def draft_backbone(project: cfgmod.Project, *, usage: Usage | None = None,
             else prompt + "\n\nYour previous draft failed validation — fix "
                           "exactly these and return the full YAML again:\n  "
                           + "\n  ".join(errors),
+            cwd=str(project.dir),
             attempt=attempt, usage=usage, budget_usd=budget_usd,
             log_path=log_path)
         text = _strip_fences(out)
         errors = _validate_backbone(text, slice_ids)
         if not errors:
             break
+        if log_path:
+            livelog.append(log_path, f"backbone draft attempt {attempt + 1} "
+                           "failed validation: " + "; ".join(errors)[:400])
     if errors:
         raise PlanError("data backbone failed validation after 2 attempts:\n  "
                         + "\n  ".join(errors))
@@ -839,6 +903,14 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
                        {"working_assumptions":
                         assumptions.get("working_assumptions", [])},
                        sort_keys=False, allow_unicode=True) + "\n")
+    uiux_map = project.dir / "specs" / "uiux-map.yaml"
+    if uiux_map.exists():
+        extras += ("APPROVED UI/UX MAP — the human-gated route map from the "
+                   "UI/UX preview. BINDING: web scenarios must target these "
+                   "routes and screens exactly, never a route or screen not "
+                   "listed here, and each screen's key_states are states its "
+                   "scenarios must cover:\n"
+                   + uiux_map.read_text() + "\n")
     backbone = load_backbone(project)
     if backbone:
         extras += (
@@ -909,6 +981,10 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
         kind_brief +
         "This file is the single source of truth for correctness; "
         "implementers never see or edit it.\n\n"
+        "BOUNDARIES: you run inside THIS project's directory. Everything you "
+        "may use is in this prompt and this project's specs/. Never read the "
+        "factory's own source code (its validators are not yours to "
+        "reverse-engineer) and never read any other project's files.\n\n"
         "Hold yourself to the standard of this exemplar (structure, precision, "
         "explicit rejection paths, test-data strategy). Its domain is "
         "deliberately FICTIONAL and its nouns are canaries: copy its FORM, "
@@ -980,6 +1056,7 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
             else prompt + "\n\nYour previous draft failed validation — fix "
                           "exactly these and return the full YAML again:\n  "
                           + "\n  ".join(errors),
+            cwd=str(project.dir),
             attempt=attempt, usage=usage, budget_usd=budget_usd, log_path=log_path,
         )
         text = _strip_fences(out)
@@ -987,6 +1064,11 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
                                  extra_nouns=extra_nouns,
                                  require_starter=True,
                                  forbidden=forbidden)
+        if errors and log_path:
+            # $2 of drafting silently retried is a mystery in the log —
+            # truev's first oracle burned attempt 1 with no visible reason.
+            livelog.append(log_path, f"oracle draft attempt {attempt + 1} "
+                           "failed validation: " + "; ".join(errors)[:400])
         if not errors:
             header = (
                 "# =============================================================================\n"

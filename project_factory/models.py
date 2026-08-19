@@ -91,6 +91,16 @@ AGENT_TIER: dict[str, str] = {
     # slice moves first (barcode-v2's expectedItemCounts JSON), and every
     # add-a-back-relation forces a risky wholesale model redeclaration.
     "schema_architect": "opus",
+
+    # Raises the questions nobody recorded (specs/decisions.yaml) once per
+    # project, before the decisions gate. Judgment about what is MISSING
+    # from the specs, not extraction of what's there — Opus-grade.
+    "decision_analyst": "opus",
+
+    # Renders the project-level UI/UX preview (specs/uiux-preview.html):
+    # tokens, primitives, low-fi screens from the board. Runs once, only
+    # under gates.uiux=human, and its output is what the human gates on.
+    "uiux_previewer": "opus",
 }
 
 # Escalate the Implementer after repeated failure: cheap first, expensive only

@@ -523,14 +523,58 @@ def _input_folder(body: dict) -> pathlib.Path | None:
     return p if p.is_dir() else None
 
 
+def _validated_input_files(body: dict) -> list[dict] | None:
+    """The browser's FOLDER picker sends the folder as [{path, content}]
+    (browsers never reveal the folder's real path — only relative paths and
+    contents). Validate hard: these paths become filesystem writes."""
+    files = (body or {}).get("input_files")
+    if not isinstance(files, list) or not files:
+        return None
+    if len(files) > 500:
+        raise HTTPException(400, "folder upload has too many files (max 500)")
+    total, out = 0, []
+    for f in files:
+        rel = (f or {}).get("path") or ""
+        content = (f or {}).get("content")
+        if not isinstance(content, str):
+            continue
+        p = pathlib.PurePosixPath(rel)
+        if p.is_absolute() or not p.parts or ".." in p.parts:
+            raise HTTPException(400, f"bad path in folder upload: {rel!r}")
+        total += len(content)
+        if total > 20_000_000:
+            raise HTTPException(400, "folder upload too large (max 20 MB)")
+        out.append({"path": str(p), "content": content})
+    return out or None
+
+
+def _write_input_files(files: list[dict], dest: pathlib.Path) -> None:
+    for f in files:
+        target = dest / f["path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f["content"])
+
+
 def _load_board_from_body(body: dict) -> tuple[dict | None, str | None]:
-    """(board_obj, preferred_filename) from board_path OR board_json in the
-    request — or (None, None) when neither was provided (allowed only when
-    reusing a project that already has a board).
+    """(board_obj, preferred_filename) from input_files, board_path OR
+    board_json in the request — or (None, None) when none was provided
+    (allowed only when reusing a project that already has a board).
 
     board_path may be a FOLDER: a delivered engagement folder (board tree +
-    backlog.json + prose). The board is resolved out of it for preview here;
-    scaffold() is what copies the folder's other artifacts."""
+    backlog.json + prose). input_files is the same folder arriving as an
+    upload from the browser's folder picker. The board is resolved out of it
+    for preview here; scaffold() is what copies the folder's other artifacts."""
+    files = _validated_input_files(body)
+    if files:
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            _write_input_files(files, root)
+            try:
+                found = cfgmod.resolve_input_folder(root)
+            except cfgmod.ConfigError as e:
+                raise HTTPException(400, str(e)) from e
+            return (_validate_board(json.loads(found.board.read_text())),
+                    found.board.name)
     board_path = ((body or {}).get("board_path") or "").strip() or None
     board_json = (body or {}).get("board_json") or None
     if board_path:
@@ -631,8 +675,9 @@ def create_project(body: dict = Body(...)):
 
     board, board_filename = _load_board_from_body(body)
     if board is None and not has_board:
-        raise HTTPException(400, "provide board_path (a .board.json file) or board_json — "
-                                 "this project has no board yet")
+        raise HTTPException(400, "provide board_path (a .board.json file or an "
+                                 "engagement folder), a folder upload, or "
+                                 "board_json — this project has no board yet")
 
     # Project mode ("run the whole board"): no seeded slice files at all —
     # the planner derives slices and the oracle_author drafts each scenarios
@@ -640,7 +685,15 @@ def create_project(body: dict = Body(...)):
     if (body or {}).get("project_mode") is True:
         specs.mkdir(parents=True, exist_ok=True)
         folder = _input_folder(body)
-        if folder is not None and not has_board:
+        input_files = _validated_input_files(body)
+        if input_files and not has_board:
+            # An uploaded engagement folder: reconstruct it and hand the
+            # FOLDER to scaffold — same reason as the path case below, the
+            # reviewed backlog beside the board must not be dropped.
+            with tempfile.TemporaryDirectory() as td:
+                _write_input_files(input_files, pathlib.Path(td))
+                project = cfgmod.scaffold(slug, td, project_mode=True)
+        elif folder is not None and not has_board:
             # Hand the FOLDER to scaffold, not the parsed board: the reviewed
             # backlog beside it is what makes planning deterministic, and
             # re-serialising just the board would silently drop it.
@@ -789,6 +842,115 @@ def put_spec(slug: str, name: str, body: dict = Body(...)):
     return {"saved": name, "bytes": len(content.encode())}
 
 
+# -----------------------------------------------------------------------------
+# Decision register — the dashboard writes through project_factory.decisions,
+# never to the YAML directly, so CLI and UI share one contract (and one
+# audit shape: answered_by + answered_at on every decision).
+# -----------------------------------------------------------------------------
+@app.get("/api/projects/{slug}/decisions")
+def api_get_decisions(slug: str):
+    from project_factory import decisions as decmod
+    project = _project_or_404(slug)
+    data = decmod.load_decisions(project)
+    if data is None:
+        raise HTTPException(404, "no decision register yet — run the project "
+                                 "once to draft it")
+    return {"register": data, "stats": decmod.stats(data)}
+
+
+@app.post("/api/projects/{slug}/decisions")
+def api_add_decision(slug: str, body: dict = Body(...)):
+    from project_factory import decisions as decmod
+    project = _project_or_404(slug)
+    try:
+        q = decmod.add_question(
+            project,
+            question=(body or {}).get("question") or "",
+            by=(body or {}).get("by") or "",
+            section=(body or {}).get("section") or "B",
+            blocker=(body or {}).get("blocker") or "slices",
+            context=(body or {}).get("context") or "",
+            owner_suggested=(body or {}).get("owner") or "")
+    except decmod.DecisionError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"question": q}
+
+
+@app.post("/api/projects/{slug}/decisions/{qid}")
+def api_resolve_decision(slug: str, qid: str, body: dict = Body(...)):
+    """action: 'answer' (with answer text), 'defer', or 'reopen'.
+    `by` is required on all three — same attributability contract as the
+    plan gate."""
+    from project_factory import decisions as decmod
+    project = _project_or_404(slug)
+    action = (body or {}).get("action")
+    by = (body or {}).get("by") or ""
+    try:
+        if action == "answer":
+            q = decmod.resolve(project, qid, by=by,
+                               answer=(body or {}).get("answer") or None)
+        elif action == "defer":
+            q = decmod.resolve(project, qid, by=by, defer=True)
+        elif action == "reopen":
+            q = decmod.reopen(project, qid, by=by)
+        else:
+            raise HTTPException(400, "action must be answer|defer|reopen")
+    except decmod.DecisionError as e:
+        raise HTTPException(400, str(e)) from e
+    data = decmod.load_decisions(project)
+    return {"question": q, "stats": decmod.stats(data)}
+
+
+# -----------------------------------------------------------------------------
+# UI/UX preview gate
+# -----------------------------------------------------------------------------
+@app.get("/api/projects/{slug}/uiux")
+def api_uiux_status(slug: str):
+    from project_factory import uiux as uiuxmod
+    project = _project_or_404(slug)
+    rec = uiuxmod.load_record(project) or {}
+    return {"preview_exists": uiuxmod.preview_path(project).exists(),
+            "approved_by": rec.get("approved_by"),
+            "approved_at": rec.get("approved_at"),
+            "feedback": rec.get("feedback", [])}
+
+
+@app.get("/api/projects/{slug}/uiux/preview")
+def api_uiux_preview(slug: str):
+    from project_factory import uiux as uiuxmod
+    project = _project_or_404(slug)
+    p = uiuxmod.preview_path(project)
+    if not p.exists():
+        raise HTTPException(404, "no preview yet — run the project to draft it")
+    return HTMLResponse(p.read_text(errors="replace"))
+
+
+@app.post("/api/projects/{slug}/uiux")
+def api_uiux_decision(slug: str, body: dict = Body(...)):
+    """action: 'approve', or 'redraw' with a note (drops the preview so the
+    next run-project regenerates it with the note in the prompt)."""
+    from project_factory import uiux as uiuxmod
+    project = _project_or_404(slug)
+    action = (body or {}).get("action")
+    by = (body or {}).get("by") or ""
+    try:
+        if action == "approve":
+            rec = uiuxmod.approve(project, by)
+        elif action == "redraw":
+            note = (body or {}).get("note") or ""
+            if not note:
+                raise HTTPException(400, "redraw requires a note — say what "
+                                         "must change")
+            if not by:
+                raise HTTPException(400, "redraw requires 'by'")
+            rec = uiuxmod.invalidate(project, by=by, note=note)
+        else:
+            raise HTTPException(400, "action must be approve|redraw")
+    except uiuxmod.UiuxError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"record": rec}
+
+
 @app.get("/api/overview")
 def overview():
     """
@@ -844,14 +1006,53 @@ def overview():
                 for p in sorted(plan["slices"], key=lambda x: (x["wave"], x["id"]))
                 if p["id"] not in have]
             slices.extend(planned_only)
+            # The two project-level gates between plan approval and slice
+            # work. Without these the card shows "Run project" while a gate
+            # silently holds the run — three separate "nothing changed"
+            # reports on 2026-08-19 were exactly this.
+            from project_factory import decisions as decmod
+            from project_factory import livelog
+            from project_factory import uiux as uiuxmod
+            reg = decmod.load_decisions(project)
+
+            # While the runner is alive, name the PHASE it's in (derived from
+            # which artifacts exist yet) and echo the log's last line — a
+            # disabled "project running…" button with no status reads as a
+            # hang once an agent takes more than a minute.
+            runner_state = runner.get_state(str(project.dir), "project")
+            phase = activity = None
+            if runner_state.get("running"):
+                if not plan.get("slices"):
+                    phase = "planning slices (planner)"
+                elif reg is None or not reg.get("analyst_done"):
+                    phase = "raising unrecorded questions (decision_analyst)"
+                elif not planmod.assumptions_path(project).exists():
+                    phase = "drafting working assumptions"
+                elif not planmod.backbone_path(project).exists():
+                    phase = "drafting data backbone"
+                elif not uiuxmod.preview_path(project).exists():
+                    phase = "drafting UI/UX preview"
+                else:
+                    phase = "running slices"
+                try:
+                    lines = livelog.path_for(str(project.dir), "project") \
+                        .read_text(errors="replace").strip().splitlines()
+                    activity = lines[-1][:160] if lines else None
+                except OSError:
+                    activity = None
             proj_block = {
+                "phase": phase,
+                "activity": activity,
                 "approved": planmod.plan_is_approved(plan),
                 "approved_by": plan.get("approved_by"),
                 "total_slices": len(plan["slices"]),
                 "completed": len(project.state.get("completed_slices", [])),
                 "project_budget_usd": float(project.cfg.get("project_budget_usd", 100.0)),
                 "spent_usd": project.spent_usd(),
-                "runner": runner.get_state(str(project.dir), "project"),
+                "runner": runner_state,
+                "decisions": (decmod.stats(reg) if reg else None),
+                "uiux": {"preview_exists": uiuxmod.preview_path(project).exists(),
+                         "approved": uiuxmod.is_approved(project)},
             }
         out.append({"slug": slug, "error": None, "slices": slices,
                     "project": proj_block})
@@ -1112,3 +1313,21 @@ def health():
 async def home():
     html = (pathlib.Path(__file__).resolve().parent / "static" / "index.html").read_text()
     return HTMLResponse(html)
+
+
+@app.get("/p/{slug}/decisions")
+async def decisions_page(slug: str):
+    _project_or_404(slug)
+    html = (pathlib.Path(__file__).resolve().parent / "static"
+            / "decisions.html").read_text()
+    # no-store: gate pages must never render stale after a factory update —
+    # the "chose folder still not working" report was a cached app.js.
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/p/{slug}/uiux")
+async def uiux_page(slug: str):
+    _project_or_404(slug)
+    html = (pathlib.Path(__file__).resolve().parent / "static"
+            / "uiux.html").read_text()
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})

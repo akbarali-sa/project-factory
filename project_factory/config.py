@@ -107,7 +107,8 @@ BUILT_IN_DEFAULTS: dict[str, Any] = {
 }
 
 # What run-project overlays when neither run.json nor --gates set a policy.
-PROJECT_GATE_POLICY = {"spec": "auto", "contract": "auto", "pr": "human"}
+PROJECT_GATE_POLICY = {"spec": "auto", "contract": "auto", "pr": "human",
+                       "decisions": "human", "uiux": "human"}
 
 
 def slugify(name: str) -> str:

@@ -121,6 +121,18 @@ def commit_spec_artifacts(repo: str, board_path: str, scenarios_path: str,
     if constitution:
         (specs / "constitution.md").write_text(constitution)
 
+    # Project-level registers ride along whenever they exist: the decision
+    # record (who answered what, and when), the assumptions it produced, the
+    # data backbone, and the approved UI/UX preview. Synced on EVERY slice,
+    # not just the first — answers recorded mid-project reach the repo with
+    # the next slice's spec commit.
+    project_specs = pathlib.Path(board_path).parent
+    for name in ("decisions.yaml", "assumptions.yaml", "data-backbone.yaml",
+                 "uiux.yaml", "uiux-preview.html", "uiux-map.yaml"):
+        src = project_specs / name
+        if src.is_file():
+            shutil.copy2(src, specs / name)
+
     _run(["git", "add", "-A"], cwd=repo)
     # Tolerate "nothing to commit": a re-run on a reused repo (new thread
     # generation, or run-project retrying a crashed slice) finds the specs
@@ -145,6 +157,12 @@ def commit(repo: str, message: str, verify: bool = True) -> None:
              cwd=repo, check=False)
     if p.returncode != 0 and "nothing to commit" not in (p.stdout + p.stderr):
         raise RuntimeError(f"commit failed:\n{p.stdout}{p.stderr}")
+    # Keep the graft cards current with what was just committed: the agents
+    # nudged to read cards instead of whole files (test author, implementers,
+    # diagnosticians) otherwise reason from clone-time cards — stale for
+    # schema.prisma the moment migrate lands, absent for every generated
+    # file. Best effort, like the initial index: never fails the commit.
+    index_with_graft(repo)
 
 
 def create_branch(repo: str, branch: str) -> None:

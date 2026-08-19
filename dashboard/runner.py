@@ -39,6 +39,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 from project_factory import livelog
@@ -67,6 +68,12 @@ def _launch(factory_root: str, project_dir: str, slice_id: str, argv: list[str])
         )
     finally:
         out.close()  # child holds its own dup'd fd — safe to close ours
+
+    # Reap the child when it exits. Without this the finished child lingers
+    # as a zombie inside the dashboard process, os.kill(pid, 0) keeps
+    # succeeding, and get_run_state reports "running" forever — freezing the
+    # project card's buttons until the dashboard itself restarts.
+    threading.Thread(target=proc.wait, daemon=True).start()
 
     # Pre-register the CHILD's pid immediately so a `status` poll right after
     # Start shows "running" with no gap — the child then confirms this same

@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Decision Register</title>
+<style>
+:root{
+  --bg:#F8F8FA; --surface:#FFFFFF; --surface-2:#F1F1F5; --surface-3:#E9E9EF;
+  --ink:#17171C; --ink-2:#54545E; --ink-3:#84848F;
+  --line:#E1E1E8; --line-2:#CDCDD6;
+  --accent:#3D3D8F; --accent-soft:#EAEAF6;
+  --ok:#2E6B4F; --ok-soft:#E6F0EA;
+  --warn:#8F4A1D; --warn-soft:#F6EDE4;
+  --def:#84848F; --def-soft:#EEEEF1;
+  --block:#8F1D2E; --block-soft:#F6E8EA;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#121216; --surface:#1A1A20; --surface-2:#222229; --surface-3:#2B2B33;
+    --ink:#EFEFF3; --ink-2:#ABABB6; --ink-3:#7B7B86;
+    --line:#2E2E37; --line-2:#3D3D47;
+    --accent:#9C9CE8; --accent-soft:#262642;
+    --ok:#6FB795; --ok-soft:#1E3229;
+    --warn:#D99464; --warn-soft:#33261C;
+    --def:#7B7B86; --def-soft:#26262C;
+    --block:#E68CA4; --block-soft:#3B2029;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1080px;margin:0 auto;padding:32px 24px 96px}
+.mast{border-bottom:2px solid var(--ink);padding-bottom:16px;margin-bottom:22px}
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--accent);margin:0 0 8px}
+h1{font-size:26px;line-height:1.15;letter-spacing:-.02em;margin:0 0 6px}
+.sub{color:var(--ink-2);margin:0}
+.statrow{display:flex;flex-wrap:wrap;gap:10px;margin:18px 0 6px}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:8px;
+  padding:10px 14px;min-width:110px}
+.stat b{display:block;font-size:20px;font-weight:640}
+.stat span{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--ink-3)}
+.stat.block b{color:var(--block)}
+.who{display:flex;align-items:center;gap:8px;margin:14px 0 4px}
+.who label{font-family:var(--mono);font-size:11px;color:var(--ink-3);
+  text-transform:uppercase;letter-spacing:.08em}
+.who input{background:var(--surface);border:1px solid var(--line-2);
+  border-radius:6px;color:var(--ink);padding:6px 10px;font-size:13px;width:200px}
+.filters{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 20px}
+.chip{background:var(--surface);border:1px solid var(--line-2);color:var(--ink-2);
+  border-radius:999px;padding:5px 14px;font-size:12.5px;cursor:pointer}
+.chip.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
+.section{margin:0 0 26px}
+.sechead{display:flex;align-items:baseline;gap:12px;border-bottom:1px solid var(--line);
+  padding-bottom:6px;margin-bottom:12px}
+.sechead h2{font-size:16px;margin:0}
+.sechead .count{font-family:var(--mono);font-size:12px;color:var(--ink-3)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;
+  padding:14px 16px 14px 18px;margin-bottom:10px;position:relative}
+.card.startblock{border-left:4px solid var(--block)}
+.card .qid{font-family:var(--mono);font-size:11.5px;color:var(--ink-3)}
+.badge{display:inline-block;font-family:var(--mono);font-size:10.5px;
+  letter-spacing:.05em;border-radius:5px;padding:2px 7px;margin-left:6px;
+  vertical-align:1px}
+.b-start{background:var(--block-soft);color:var(--block)}
+.b-wave0,.b-slices{background:var(--warn-soft);color:var(--warn)}
+.b-completion,.b-none{background:var(--def-soft);color:var(--def)}
+.b-src{background:var(--surface-3);color:var(--ink-3)}
+.qtext{font-size:14.5px;font-weight:560;margin:6px 0 4px}
+.qmeta{color:var(--ink-3);font-size:12.5px;margin:0 0 8px}
+.rec{background:var(--surface-2);border-radius:7px;padding:8px 12px;
+  font-size:13px;color:var(--ink-2);margin:8px 0}
+.rec b{color:var(--ink);font-weight:600}
+.ans{background:var(--ok-soft);border-radius:7px;padding:8px 12px;font-size:13px;margin:8px 0}
+.ans.deferred{background:var(--def-soft)}
+.ans .by{font-family:var(--mono);font-size:11px;color:var(--ink-3);display:block;margin-top:4px}
+.controls{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+textarea{width:100%;min-height:54px;background:var(--surface);color:var(--ink);
+  border:1px solid var(--line-2);border-radius:7px;padding:8px 10px;
+  font-family:var(--sans);font-size:13px;resize:vertical}
+button{border:1px solid var(--line-2);background:var(--surface);color:var(--ink-2);
+  border-radius:7px;padding:6px 14px;font-size:13px;cursor:pointer}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.quiet{border:none;background:none;color:var(--ink-3);text-decoration:underline;padding:6px 4px}
+.addbox{background:var(--surface);border:1px dashed var(--line-2);border-radius:10px;
+  padding:16px;margin-top:30px}
+.addbox h3{margin:0 0 10px;font-size:15px}
+.addrow{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center}
+select{background:var(--surface);color:var(--ink);border:1px solid var(--line-2);
+  border-radius:6px;padding:6px 8px;font-size:13px}
+.note{color:var(--ink-3);font-size:12.5px}
+.err{background:var(--block-soft);color:var(--block);border-radius:7px;
+  padding:10px 14px;margin:12px 0;display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="mast">
+    <p class="eyebrow"><a href="/" style="color:var(--accent);text-decoration:none">← Dashboard</a> &nbsp;·&nbsp; Gate Register</p>
+    <h1 id="title">Decision Register</h1>
+    <p class="sub">Every question this build needs answered. Answers recorded here land in
+      <code>specs/decisions.yaml</code> in git — what one person writes, everyone (and every agent) sees.</p>
+  </div>
+  <div class="statrow" id="stats"></div>
+  <div id="allclear" style="display:none;background:var(--ok-soft);color:var(--ok);
+    border-radius:8px;padding:12px 16px;margin:8px 0 4px;font-weight:560">
+    All start-blockers resolved — the gate is open.
+    <a href="/" style="color:var(--ok);font-weight:640">Back to the dashboard →</a>
+    and hit <b>Run project ▶</b>.
+  </div>
+  <div class="who">
+    <label for="by">Answering as</label>
+    <input id="by" placeholder="your name — recorded on every decision">
+  </div>
+  <div class="filters">
+    <button class="chip on" data-f="all">All</button>
+    <button class="chip" data-f="open">Unanswered only</button>
+    <button class="chip" data-f="start">Start-blockers only</button>
+  </div>
+  <div class="err" id="err"></div>
+  <div id="sections"></div>
+  <div class="addbox">
+    <h3>Raise a question</h3>
+    <textarea id="newq" placeholder="The question nobody recorded…"></textarea>
+    <div class="addrow">
+      <select id="newsec"></select>
+      <select id="newblock">
+        <option value="start">blocks start</option>
+        <option value="wave0">blocks wave 0</option>
+        <option value="slices" selected>blocks slices</option>
+        <option value="completion">blocks completion</option>
+        <option value="none">record only</option>
+      </select>
+      <button class="primary" onclick="addQ()">Add to register</button>
+      <span class="note">Human-raised questions get H-ids and sit under the same gate.</span>
+    </div>
+  </div>
+</div>
+<script>
+const slug = location.pathname.split("/")[2];
+const api = `/api/projects/${slug}/decisions`;
+let reg = null, filter = "all";
+const byInput = document.getElementById("by");
+byInput.value = localStorage.getItem("pf_decided_by") || "";
+byInput.addEventListener("change", () => localStorage.setItem("pf_decided_by", byInput.value.trim()));
+
+document.querySelectorAll(".chip").forEach(c => c.onclick = () => {
+  document.querySelectorAll(".chip").forEach(x => x.classList.remove("on"));
+  c.classList.add("on"); filter = c.dataset.f; render();
+});
+
+function esc(s){ const d=document.createElement("div"); d.textContent=s==null?"":String(s); return d.innerHTML; }
+function fail(msg){ const e=document.getElementById("err"); e.textContent=msg; e.style.display="block";
+  setTimeout(()=>e.style.display="none", 6000); }
+
+async function load(){
+  const r = await fetch(api);
+  if(!r.ok){ fail((await r.json()).detail || r.statusText); return; }
+  const j = await r.json(); reg = j.register; renderStats(j.stats); render(); renderSections();
+}
+function renderStats(st){
+  document.getElementById("title").textContent = `${reg.project} — Decision Register`;
+  document.title = `${reg.project} · decisions`;
+  document.getElementById("allclear").style.display =
+    st.open_start_blockers === 0 ? "block" : "none";
+  document.getElementById("stats").innerHTML = `
+    <div class="stat"><b>${st.answered}</b><span>answered</span></div>
+    <div class="stat"><b>${st.deferred}</b><span>deferred</span></div>
+    <div class="stat"><b>${st.open}</b><span>open</span></div>
+    <div class="stat block"><b>${st.open_start_blockers}</b><span>start-blockers open</span></div>`;
+}
+function renderSections(){
+  const sel = document.getElementById("newsec");
+  sel.innerHTML = reg.sections.map(s=>`<option value="${esc(s.id)}">${esc(s.id)} · ${esc(s.title)}</option>`).join("");
+  sel.value = "B";
+}
+function visible(q){
+  if(filter==="open") return q.status==="open";
+  if(filter==="start") return q.blocker==="start";
+  return true;
+}
+function card(q){
+  const start = q.blocker==="start";
+  const meta = [q.owner_suggested && `owner: ${esc(q.owner_suggested)}`,
+                q.context && esc(q.context)].filter(Boolean).join(" · ");
+  let body = "";
+  if(q.status==="open"){
+    body = `${q.recommended?`<div class="rec"><b>Recommended</b> — ${esc(q.recommended)}</div>`:""}
+      <textarea id="a-${esc(q.id)}" placeholder="The decision — recorded verbatim, consumed by every agent downstream">${q.recommended?esc(q.recommended):""}</textarea>
+      <div class="controls">
+        <button class="primary" onclick="act('${esc(q.id)}','answer')">Answer</button>
+        <button onclick="act('${esc(q.id)}','defer')">Defer — proceed on a recorded assumption</button>
+      </div>`;
+  } else {
+    body = `<div class="ans ${q.status==='deferred'?'deferred':''}">
+        ${q.status==="deferred" ? "Deferred — the factory proceeds on a recorded working assumption."
+                                : esc(q.answer)}
+        <span class="by">${esc(q.answered_by)} · ${esc((q.answered_at||"").slice(0,16).replace("T"," "))}</span>
+      </div>
+      <div class="controls"><button class="quiet" onclick="act('${esc(q.id)}','reopen')">Reopen</button></div>`;
+  }
+  return `<div class="card ${start&&q.status==="open"?"startblock":""}">
+    <span class="qid">${esc(q.id)}</span>
+    <span class="badge b-${esc(q.blocker)}">${start?"blocks start":"blocks "+esc(q.blocker)}</span>
+    <span class="badge b-src">${esc(q.source)}</span>
+    <p class="qtext">${esc(q.question)}</p>
+    ${meta?`<p class="qmeta">${meta}</p>`:""}
+    ${body}</div>`;
+}
+function render(){
+  const holder = document.getElementById("sections");
+  holder.innerHTML = reg.sections.map(sec=>{
+    const qs = reg.questions.filter(q=>(q.section||"B")===sec.id);
+    const shown = qs.filter(visible);
+    if(!qs.length) return "";
+    const done = qs.filter(q=>q.status!=="open").length;
+    return `<div class="section">
+      <div class="sechead"><h2>${esc(sec.id)} · ${esc(sec.title)}</h2>
+        <span class="count">${done}/${qs.length} resolved</span></div>
+      ${shown.map(card).join("") || `<p class="note">nothing matching the filter</p>`}
+    </div>`;
+  }).join("");
+}
+async function act(qid, action){
+  const by = byInput.value.trim();
+  if(!by){ fail("Enter your name first — every decision is attributable."); byInput.focus(); return; }
+  const body = {action, by};
+  if(action==="answer"){
+    const t = document.getElementById(`a-${qid}`).value.trim();
+    if(!t){ fail("Write the decision before answering."); return; }
+    body.answer = t;
+  }
+  const r = await fetch(`${api}/${encodeURIComponent(qid)}`,
+    {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  if(!r.ok){ fail((await r.json()).detail || r.statusText); return; }
+  load();
+}
+async function addQ(){
+  const by = byInput.value.trim();
+  const question = document.getElementById("newq").value.trim();
+  if(!by){ fail("Enter your name first."); byInput.focus(); return; }
+  if(!question){ fail("Write the question."); return; }
+  const r = await fetch(api, {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({question, by,
+      section: document.getElementById("newsec").value,
+      blocker: document.getElementById("newblock").value})});
+  if(!r.ok){ fail((await r.json()).detail || r.statusText); return; }
+  document.getElementById("newq").value = "";
+  load();
+}
+load();
+</script>
+</body>
+</html>

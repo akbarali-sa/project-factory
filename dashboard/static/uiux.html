@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UI/UX Preview Gate</title>
+<style>
+:root{
+  --bg:#F8F8FA; --surface:#FFFFFF; --ink:#17171C; --ink-2:#54545E; --ink-3:#84848F;
+  --line:#E1E1E8; --line-2:#CDCDD6;
+  --accent:#3D3D8F; --ok:#2E6B4F; --ok-soft:#E6F0EA;
+  --block:#8F1D2E; --block-soft:#F6E8EA;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#121216; --surface:#1A1A20; --ink:#EFEFF3; --ink-2:#ABABB6; --ink-3:#7B7B86;
+    --line:#2E2E37; --line-2:#3D3D47;
+    --accent:#9C9CE8; --ok:#6FB795; --ok-soft:#1E3229;
+    --block:#E68CA4; --block-soft:#3B2029;
+  }
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  font-size:14px;display:flex;flex-direction:column}
+.bar{background:var(--surface);border-bottom:1px solid var(--line);
+  padding:12px 20px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.bar h1{font-size:15px;margin:0 14px 0 0;font-weight:640}
+.bar .status{font-family:var(--mono);font-size:12px}
+.status.approved{color:var(--ok)}
+.status.waiting{color:var(--block)}
+.bar input,.bar textarea{background:var(--bg);border:1px solid var(--line-2);
+  border-radius:6px;color:var(--ink);padding:6px 10px;font-size:13px;font-family:var(--sans)}
+.bar input{width:170px}
+.bar textarea{width:300px;height:34px;resize:horizontal;vertical-align:middle}
+button{border:1px solid var(--line-2);background:var(--surface);color:var(--ink-2);
+  border-radius:7px;padding:7px 16px;font-size:13px;cursor:pointer}
+button.approve{background:var(--ok);border-color:var(--ok);color:#fff}
+button.redraw{background:var(--block-soft);border-color:var(--block);color:var(--block)}
+.spacer{flex:1}
+iframe{flex:1;border:none;width:100%;background:#fff}
+.missing{padding:60px 24px;text-align:center;color:var(--ink-3)}
+.err{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);
+  background:var(--block-soft);color:var(--block);border-radius:8px;
+  padding:10px 18px;display:none;font-size:13px}
+</style>
+</head>
+<body>
+<div class="bar">
+  <a href="/" style="color:var(--accent);text-decoration:none;font-size:13px">← Dashboard</a>
+  <h1 id="title">UI/UX Preview</h1>
+  <span class="status" id="status"></span>
+  <span class="spacer"></span>
+  <input id="by" placeholder="your name (recorded)">
+  <button class="approve" onclick="decide('approve')">Approve — release slice work</button>
+  <textarea id="note" placeholder="what must change (for redraw)"></textarea>
+  <button class="redraw" onclick="decide('redraw')">Demand redraw</button>
+</div>
+<div id="frameholder" style="flex:1;display:flex"></div>
+<div class="err" id="err"></div>
+<script>
+const slug = location.pathname.split("/")[2];
+const byInput = document.getElementById("by");
+byInput.value = localStorage.getItem("pf_decided_by") || "";
+byInput.addEventListener("change", () => localStorage.setItem("pf_decided_by", byInput.value.trim()));
+function fail(m){ const e=document.getElementById("err"); e.textContent=m; e.style.display="block";
+  setTimeout(()=>e.style.display="none",6000); }
+
+async function load(){
+  document.getElementById("title").textContent = `${slug} — UI/UX Preview`;
+  document.title = `${slug} · ui/ux gate`;
+  const r = await fetch(`/api/projects/${slug}/uiux`);
+  const j = await r.json();
+  const st = document.getElementById("status");
+  const holder = document.getElementById("frameholder");
+  if(j.approved_by){
+    st.textContent = `approved by ${j.approved_by} · ${(j.approved_at||"").slice(0,16).replace("T"," ")}`;
+    st.className = "status approved";
+  } else {
+    st.textContent = j.preview_exists ? "awaiting approval — this gate holds slice work"
+                                      : "no preview yet";
+    st.className = "status waiting";
+  }
+  if(j.preview_exists){
+    holder.innerHTML = `<iframe src="/api/projects/${slug}/uiux/preview" sandbox="allow-same-origin"></iframe>`;
+  } else {
+    const fb = (j.feedback||[]).map(f=>`<p>“${f.note}” — ${f.by}</p>`).join("");
+    holder.innerHTML = `<div class="missing"><p>No preview yet. Run the project to draft it:</p>
+      <p><code>python -m project_factory run-project ${slug}</code></p>${fb}</div>`;
+  }
+}
+async function decide(action){
+  const by = byInput.value.trim();
+  if(!by){ fail("Enter your name first — the gate is attributable."); byInput.focus(); return; }
+  const body = {action, by};
+  if(action==="redraw"){
+    const note = document.getElementById("note").value.trim();
+    if(!note){ fail("Say what must change — the note drives the redraw."); return; }
+    body.note = note;
+  }
+  const r = await fetch(`/api/projects/${slug}/uiux`,
+    {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  if(!r.ok){ fail((await r.json()).detail || r.statusText); return; }
+  // Both outcomes send you back to the card, which knows the next step
+  // (Run project after approve; regenerate after redraw).
+  location.href = "/";
+}
+load();
+</script>
+</body>
+</html>

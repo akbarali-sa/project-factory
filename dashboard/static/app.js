@@ -243,14 +243,35 @@ function renderProjectBanner(slug, pj) {
   const running = pj.runner && pj.runner.running;
   // Three states: no plan yet (planner hasn't run) → Plan project;
   // plan exists unapproved → Approve plan; approved → Run/Continue.
+  // Project-level gates between plan approval and slice work, in pipeline
+  // order: decisions (open start-blockers hold the run), then UI/UX
+  // (a drafted preview awaiting approval). Without these states the card
+  // says "Run project" while a gate silently holds everything.
+  const decBlockers = pj.approved && pj.decisions ? pj.decisions.open_start_blockers : 0;
+  const uiuxPending = pj.approved && !decBlockers && pj.uiux
+    && pj.uiux.preview_exists && !pj.uiux.approved;
   const planState = !pj.total_slices ? 'not planned yet'
-    : pj.approved ? `plan approved by ${escapeHtml(pj.approved_by || '?')}`
-    : 'plan awaiting approval';
+    : !pj.approved ? 'plan awaiting approval'
+    : decBlockers ? `decision gate — ${decBlockers} start-blocker${decBlockers === 1 ? '' : 's'} open`
+    : uiuxPending ? 'UI/UX preview awaiting approval'
+    : `plan approved by ${escapeHtml(pj.approved_by || '?')}`;
   const button = !pj.total_slices
     ? `<button class="btn btn-primary" ${running ? 'disabled' : ''} onclick="runProject('${escapeAttr(slug)}')">${running ? 'planning…' : 'Plan project ▶'}</button>`
-    : pj.approved
-      ? `<button class="btn" ${running ? 'disabled' : ''} onclick="runProject('${escapeAttr(slug)}')">${running ? 'project running…' : (pj.completed ? 'Continue project ▶' : 'Run project ▶')}</button>`
-      : `<button class="btn btn-primary" onclick="approvePlanUI('${escapeAttr(slug)}')">Approve plan ✓</button>`;
+    : !pj.approved
+      ? `<button class="btn btn-primary" onclick="approvePlanUI('${escapeAttr(slug)}')">Approve plan ✓</button>`
+    : decBlockers
+      ? `<a class="btn btn-primary" href="/p/${encodeURIComponent(slug)}/decisions">Review decisions →</a>`
+    : uiuxPending
+      ? `<a class="btn btn-primary" href="/p/${encodeURIComponent(slug)}/uiux">Review UI/UX →</a>`
+      : `<button class="btn" ${running ? 'disabled' : ''} onclick="runProject('${escapeAttr(slug)}')">${running ? 'project running…' : (pj.completed ? 'Continue project ▶' : 'Run project ▶')}</button>`;
+  // Live phase + last log line while the runner is working, so a
+  // minutes-long agent never reads as a hang.
+  const activityRow = running && pj.phase ? `
+      <div class="pb-row" style="margin-top:6px;">
+        <span class="pb-progress" style="color:var(--muted);font-size:12px;">
+          <span class="spinner-dot">●</span> ${escapeHtml(pj.phase)}${pj.activity ? ` — ${escapeHtml(pj.activity)}` : ''}
+        </span>
+      </div>` : '';
   return `
     <div class="project-banner" onclick="event.stopPropagation()">
       <div class="pb-row">
@@ -259,6 +280,7 @@ function renderProjectBanner(slug, pj) {
         <span class="pb-spacer"></span>
         ${button}
       </div>
+      ${activityRow}
       <div class="pb-budget">
         <div class="pb-budget-bar"><div class="pb-budget-fill${pct > 85 ? ' hot' : ''}" style="width:${pct.toFixed(1)}%"></div></div>
         <span class="pb-budget-label">$${pj.spent_usd.toFixed(2)} / $${pj.project_budget_usd.toFixed(0)} project budget</span>
@@ -817,12 +839,23 @@ function toggleNewProjectForm(show) {
 // server needs: it copies the board into specs/ anyway, so only the
 // filename matters for naming the copy.
 let npBoardFile = null;
+let npInputFiles = null;   // uploaded engagement FOLDER: [{path, content}]
 let npCandidates = [];
 
 function setNpBoardFile(file) {
   npBoardFile = file;
-  document.getElementById('np-board-file-name').textContent = file ? `${file.name} (${Math.round(file.content.length / 1024)} KB)` : 'no file selected';
-  document.getElementById('np-board-clear').classList.toggle('hidden', !file);
+  if (file) npInputFiles = null;
+  document.getElementById('np-board-file-name').textContent = file ? `${file.name} (${Math.round(file.content.length / 1024)} KB)` : 'nothing selected';
+  document.getElementById('np-board-clear').classList.toggle('hidden', !file && !npInputFiles);
+  inspectBoard();
+}
+
+function setNpFolder(name, files) {
+  npInputFiles = files;
+  if (files) npBoardFile = null;
+  document.getElementById('np-board-file-name').textContent =
+    files ? `📁 ${name}/ (${files.length} file${files.length === 1 ? '' : 's'})` : 'nothing selected';
+  document.getElementById('np-board-clear').classList.toggle('hidden', !files && !npBoardFile);
   inspectBoard();
 }
 
@@ -835,11 +868,39 @@ function onBoardFilePicked(ev) {
   reader.readAsText(f);
 }
 
+// Folder picker: the browser hands us every file's relative path + content
+// (never the folder's real path). Only text artifacts the factory reads are
+// sent — board/backlog JSON, markdown stories, yaml — the server
+// reconstructs the folder and resolves the board out of it exactly as it
+// would for a typed folder path.
+const NP_FOLDER_EXTS = ['.json', '.md', '.txt', '.yaml', '.yml', '.csv'];
+function onFolderPicked(ev) {
+  const all = [...(ev.target.files || [])];
+  if (!all.length) { setNpFolder(null, null); return; }
+  const topDir = (all[0].webkitRelativePath || '').split('/')[0];
+  const wanted = all.filter(f =>
+    NP_FOLDER_EXTS.some(ext => f.name.toLowerCase().endsWith(ext))
+    && f.size <= 5 * 1024 * 1024
+    && !f.webkitRelativePath.split('/').some(seg => seg.startsWith('.') || seg === 'node_modules'));
+  if (!wanted.length) {
+    document.getElementById('np-status').textContent = 'no board/backlog/story files found in that folder';
+    setNpFolder(null, null);
+    return;
+  }
+  Promise.all(wanted.map(f => f.text().then(content => ({
+    // strip the top folder segment so the board sits at the upload's root
+    path: f.webkitRelativePath.split('/').slice(1).join('/') || f.name,
+    content,
+  })))).then(files => setNpFolder(topDir, files))
+    .catch(() => { setNpFolder(null, null); document.getElementById('np-status').textContent = 'could not read the folder'; });
+}
+
 // Body for board-carrying requests, in the same priority order the create
-// call uses: picked file > typed path > pasted JSON.
+// call uses: picked folder > picked file > typed path > pasted JSON.
 function boardBody() {
   const boardPath = document.getElementById('np-board-path').value.trim();
   const boardJson = document.getElementById('np-board-json').value.trim();
+  if (npInputFiles) return { input_files: npInputFiles };
   if (npBoardFile) return { board_json: npBoardFile.content, board_filename: npBoardFile.name };
   if (boardPath) return { board_path: boardPath };
   if (boardJson) return { board_json: boardJson };
@@ -889,7 +950,7 @@ async function createProject() {
   const sliceName = document.getElementById('np-slice-name').value.trim();
   const status = document.getElementById('np-status');
   if (!slug) { status.textContent = 'slug is required'; return; }
-  if (!npBoardFile && !boardPath && !boardJson) { status.textContent = 'choose a board file, type a path, or paste board JSON'; return; }
+  if (!npInputFiles && !npBoardFile && !boardPath && !boardJson) { status.textContent = 'choose a board file or engagement folder, type a path, or paste board JSON'; return; }
 
   const body = { slug, slice_name: sliceName || null, ...boardBody() };
   body.db_reset_consent = document.getElementById('np-consent').checked;
@@ -992,8 +1053,12 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('np-create').addEventListener('click', createProject);
   document.getElementById('np-board-pick').addEventListener('click', () => document.getElementById('np-board-file').click());
   document.getElementById('np-board-file').addEventListener('change', onBoardFilePicked);
+  document.getElementById('np-folder-pick').addEventListener('click', () => document.getElementById('np-board-folder').click());
+  document.getElementById('np-board-folder').addEventListener('change', onFolderPicked);
   document.getElementById('np-board-clear').addEventListener('click', () => {
     document.getElementById('np-board-file').value = '';
+    document.getElementById('np-board-folder').value = '';
+    setNpFolder(null, null);
     setNpBoardFile(null);
   });
   // Typed path / pasted JSON also drive the slice-candidate list — inspect

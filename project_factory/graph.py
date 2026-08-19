@@ -314,12 +314,23 @@ def architect(state: S) -> dict:
         "relation the backbone already lists:\n"
         f"```yaml\n{backbone_file.read_text()}\n```\n\n"
     ) if backbone_file.exists() else ""
+    uiux_map_file = (pathlib.Path(state["project_dir"]) / "specs"
+                     / "uiux-map.yaml")
+    uiux_map = (
+        "APPROVED UI/UX MAP — the human-gated route/screen contract from the "
+        "project's UI/UX preview. BINDING for route paths, screen inventory "
+        "and per-screen states; the full visual reference is "
+        "specs/uiux-preview.html in this repo, read it for any screen this "
+        "slice serves:\n"
+        f"```yaml\n{uiux_map_file.read_text()}\n```\n\n"
+    ) if uiux_map_file.exists() else ""
     out = claude(
         "architect",
         "Design the data + API contract for ONE vertical slice of an existing "
         "NestJS + Prisma + Next.js monorepo. Follow the repo's conventions and "
         "match the existing reference module exactly. Invent no new structural "
         "patterns.\n\n"
+        + _GRAFT_NUDGE +
         "REDECLARE-TO-MODIFY: your prisma block is spliced into the repo's "
         "existing schema.prisma — new models/enums are appended, and a model "
         "you redeclare REPLACES the existing one wholesale. To change an "
@@ -330,7 +341,7 @@ def architect(state: S) -> dict:
         "leaves every relation that depends on it dangling. A redeclaration "
         "must reproduce every existing field of the model — dropping one is "
         "a silent destructive migration and fails validation.\n\n"
-        + backbone +
+        + backbone + uiux_map +
         f"Aggregates: {sc['aggregates']}\n\n"
         f"Domain events:\n{json.dumps(relevant, indent=1)}\n\n"
         f"API scenarios the contract must satisfy:\n"
@@ -436,6 +447,7 @@ def write_tests(state: S) -> dict:
         "Write executable tests from approved scenarios. Two suites:\n"
         f"  1. Vitest API integration tests -> apps/api/__tests__/{slug}/\n"
         f"  2. Playwright E2E tests -> apps/web/__tests__/e2e/{slug}/\n\n"
+        + _GRAFT_NUDGE
         + blocked
         + "Rules: one test per scenario; put the scenario id in the test name; "
         "assert exactly what the scenario states. Write NO implementation code. "
@@ -611,7 +623,12 @@ def implement_web(state: S) -> dict:
     return _implement(state, "web", WRITE_WEB,
                       "Implement the React/Next.js screen and its API client so "
                       "the web unit tests pass. Use the repo's design system and "
-                      "existing UI components; keep it accessible.")
+                      "existing UI components; keep it accessible. If "
+                      "specs/uiux-map.yaml and specs/uiux-preview.html exist in "
+                      "this repo they are the APPROVED layout reference — "
+                      "BINDING for route paths, screen structure and the states "
+                      "each screen handles; the design system stays the visual "
+                      "layer.")
 
 
 def fix_e2e(state: S) -> dict:
