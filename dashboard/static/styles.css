@@ -147,6 +147,13 @@ button.link-btn {
   color: var(--ink); background: var(--code-bg);
 }
 .slice-row .mini-links a:hover { border-color: var(--green); }
+.pb-links { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.pb-links a {
+  display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 7px;
+  padding: 2px 8px; font-size: 0.7rem; font-weight: 600; text-decoration: none;
+  color: var(--ink); background: var(--code-bg);
+}
+.pb-links a:hover { border-color: var(--green); }
 .slice-row .sright { text-align: right; flex: none; }
 .slice-row .spct { font-size: 0.8rem; font-weight: 700; }
 .slice-row .spill { font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; padding: 2px 7px; border-radius: 999px; margin-top: 3px; display: inline-block; }

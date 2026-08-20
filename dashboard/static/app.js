@@ -365,6 +365,18 @@ function renderProjectBanner(slug, pj) {
     : uiuxPending
       ? `<a class="btn btn-primary" href="/p/${encodeURIComponent(slug)}/uiux">Review UI/UX →</a>`
       : `<button class="btn" ${running ? 'disabled' : ''} onclick="runProject('${escapeAttr(slug)}')">${running ? 'project running…' : (pj.completed ? 'Continue project ▶' : 'Run project ▶')}</button>`;
+  // The decisions register and UI/UX preview stay useful long after their
+  // gates release — reference links live on the card whenever the artifact
+  // exists, independent of the gate CTA above.
+  const links = [];
+  if (pj.decisions) {
+    links.push(`<a href="/p/${encodeURIComponent(slug)}/decisions">decisions · ${pj.decisions.answered}/${pj.decisions.total} answered ↗</a>`);
+  }
+  if (pj.uiux && pj.uiux.preview_exists) {
+    links.push(`<a href="/p/${encodeURIComponent(slug)}/uiux">UI/UX preview${pj.uiux.approved ? ' ✓' : ''} ↗</a>`);
+  }
+  const quickLinks = links.length
+    ? `<div class="mini-links pb-links" onclick="event.stopPropagation()">${links.join('')}</div>` : '';
   // Live phase + last log line while the runner is working, so a
   // minutes-long agent never reads as a hang.
   const activityRow = running && pj.phase ? `
@@ -386,6 +398,7 @@ function renderProjectBanner(slug, pj) {
         <div class="pb-budget-bar"><div class="pb-budget-fill${pct > 85 ? ' hot' : ''}" style="width:${pct.toFixed(1)}%"></div></div>
         <span class="pb-budget-label">$${pj.spent_usd.toFixed(2)} / $${pj.project_budget_usd.toFixed(0)} project budget</span>
       </div>
+      ${quickLinks}
     </div>`;
 }
 
