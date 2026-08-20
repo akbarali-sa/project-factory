@@ -65,7 +65,9 @@ seconds:
   run.json. Plain `run` keeps all gates human regardless.
 * **Approved slices merge into main** (`merge_slice` node, --no-ff) so slice
   N+1 builds on delivered code. The per-slice branch survives for archaeology.
-* **One project budget** (`project_budget_usd`, default $100) across
+* **One project budget** (`project_budget_usd`; default is auto — $50 ×
+  planned slices, $100 flat until the plan exists; set a number in
+  run.json to pin it) across
   planning, oracle drafting, and every slice. Each slice thread gets the
   REMAINING balance as its own breaker ceiling. Per-slice actuals land in
   `.factory/state.json` `slice_costs` from the LIVE LOG (ground truth), not

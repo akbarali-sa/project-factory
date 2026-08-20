@@ -92,6 +92,28 @@ def plan_is_approved(plan: dict | None) -> bool:
     return bool(plan and plan.get("approved_by"))
 
 
+PER_SLICE_BUDGET_USD = 50.0
+# Bounds the planning phase itself, before any slices exist to scale from.
+PRE_PLAN_BUDGET_USD = 100.0
+
+
+def project_budget_usd(project: cfgmod.Project, plan: dict | None = None) -> float:
+    """
+    The project-wide ceiling. An explicit number in run.json (or defaults.json)
+    wins; otherwise the budget scales with the plan — $50 per planned slice —
+    so a 3-slice project isn't handed an 8-slice wallet. Until the planner has
+    produced slices there is nothing to scale from, so a flat $100 bounds the
+    planning phase.
+    """
+    explicit = project.cfg.get("project_budget_usd")
+    if isinstance(explicit, (int, float)) and not isinstance(explicit, bool):
+        return float(explicit)
+    if plan is None:
+        plan = load_plan(project)
+    n = len((plan or {}).get("slices") or [])
+    return PER_SLICE_BUDGET_USD * n if n else PRE_PLAN_BUDGET_USD
+
+
 # -----------------------------------------------------------------------------
 # Board digest — what the planner sees
 # -----------------------------------------------------------------------------

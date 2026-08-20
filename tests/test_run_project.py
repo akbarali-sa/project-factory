@@ -245,7 +245,27 @@ class ProjectAccountingTests(unittest.TestCase):
             self.assertTrue((p.dir / "specs" / "project-plan.json").exists())
             run_cfg = json.loads((p.dir / "run.json").read_text())
             self.assertIn("project_budget_usd", run_cfg)
+            self.assertIsNone(run_cfg["project_budget_usd"])  # auto: $50/slice
             self.assertNotIn("budget_usd", run_cfg)
+
+    def test_project_budget_scales_with_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = self._project(td)
+            # no plan slices yet -> flat pre-plan bound
+            self.assertEqual(planner.project_budget_usd(p),
+                             planner.PRE_PLAN_BUDGET_USD)
+            plan = {"slices": [{"id": f"s{i}", "wave": 1} for i in range(3)],
+                    "out_of_scope": [], "approved_by": None}
+            self.assertEqual(planner.project_budget_usd(p, plan), 150.0)
+
+    def test_project_budget_explicit_override_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = self._project(td)
+            (p.dir / "run.json").write_text(json.dumps(
+                {"project_budget_usd": 500}))
+            p = cfgmod.discover("proj", workspace=td)
+            plan = {"slices": [{"id": "s1", "wave": 1}]}
+            self.assertEqual(planner.project_budget_usd(p, plan), 500.0)
 
 
 class GatePolicyTests(unittest.TestCase):

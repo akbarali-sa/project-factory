@@ -173,15 +173,26 @@ function showOverviewView() {
   state.overviewTimer = setInterval(fetchOverview, 4000);
 }
 
+// /api/overview can take seconds (it probes every slice's stack), so the 4s
+// poll overlaps itself and responses can arrive out of order — a stale one
+// landing after a fresh one used to erase a just-created project from the
+// grid until the next poll. Render monotonically: a response may paint only
+// if it was issued after the last one painted ("newest wins" would be wrong
+// here — with responses slower than the poll interval, every response is
+// already superseded when it lands and the grid would never paint at all).
+let overviewSeq = 0, overviewRendered = 0;
 async function fetchOverview() {
   if (document.hidden) return;   // background tabs neither fetch nor render
+  const seq = ++overviewSeq;
   try {
     const res = await fetch('/api/overview');
     const data = await res.json();
+    if (seq <= overviewRendered) return;
+    overviewRendered = seq;
     renderOverview(data);
     setConn(true);
   } catch (e) {
-    setConn(false);
+    if (seq > overviewRendered) setConn(false);
   }
 }
 
@@ -981,6 +992,22 @@ async function createProject() {
     document.getElementById('np-project-mode').checked = false;
     npCandidates = [];
     setNpBoardFile(null);
+    // Paint the new project NOW: the confirming /api/overview round-trip can
+    // take seconds, and an unchanged grid after clicking Create reads as
+    // "nothing happened". Marking every in-flight poll as already rendered
+    // stops a response issued before the create from wiping this card.
+    if (!state.projects.some(p => p.slug === data.slug)) {
+      overviewRendered = overviewSeq;
+      renderOverview([{
+        slug: data.slug, error: null, slices: [],
+        project: data.project_mode ? {
+          phase: null, activity: null, approved: false, approved_by: null,
+          total_slices: 0, completed: 0, project_budget_usd: 100, spent_usd: 0,
+          runner: { running: false }, decisions: null,
+          uiux: { preview_exists: false, approved: false },
+        } : null,
+      }, ...state.projects]);
+    }
     state.projects = [];  // force switcher refresh
     await fetchOverview();
     if (data.slices && data.slices.length) goDetail(data.slug, data.slices[0].id);

@@ -86,7 +86,9 @@ BUILT_IN_DEFAULTS: dict[str, Any] = {
     # Whole-project ceiling for run-project (all slices + planning + oracle
     # drafting). Each slice thread receives the REMAINING balance as its
     # per-run budget_usd, so one runaway slice can't eat the project.
-    "project_budget_usd": 100.0,
+    # None = auto: $50 × planned slices (see planner.project_budget_usd);
+    # set a number here or in run.json to pin it.
+    "project_budget_usd": None,
     # Gate policy: who answers each gate. "human" interrupts and waits; "auto"
     # records a driver approval with the mechanical evidence (gap counts /
     # contract lint) and continues. The safe default is all-human — run-project
@@ -656,7 +658,9 @@ def scaffold(slug: str, board: str | None, workspace: str | None = None,
                          "specs/ — do not list them here."),
         }
         if project_mode:
-            overrides["project_budget_usd"] = BUILT_IN_DEFAULTS["project_budget_usd"]
+            # null = auto: $50 × planned slices, known only after planning.
+            # Replace with a number to pin the ceiling.
+            overrides["project_budget_usd"] = None
         else:
             overrides["budget_usd"] = BUILT_IN_DEFAULTS["budget_usd"]
         run_file.write_text(json.dumps(overrides, indent=2) + "\n")

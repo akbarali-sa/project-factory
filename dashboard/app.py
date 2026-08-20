@@ -174,18 +174,28 @@ def _repo_info(project) -> dict | None:
     return {"path": str(repo), "branch": branch or None}
 
 
-def _status_payload(slug: str, slice_id: str) -> dict:
-    try:
-        project = cfgmod.discover(slug)
-    except cfgmod.ConfigError as e:
-        raise HTTPException(404, str(e)) from e
+def _status_payload(slug: str, slice_id: str, light: bool = False,
+                    project: cfgmod.Project | None = None) -> dict:
+    """
+    light=True skips the two expensive, detail-view-only computations — the
+    full checkpoint-history walk (per-phase active time/cost) and the git
+    repo probe. The overview grid renders none of that, and paying for it
+    per slice × per project made /api/overview take seconds per poll.
+    `project` lets a caller that already ran discover() (overview does, once
+    per project) skip re-parsing every slice file for every slice's status.
+    """
+    if project is None:
+        try:
+            project = cfgmod.discover(slug)
+        except cfgmod.ConfigError as e:
+            raise HTTPException(404, str(e)) from e
 
     conn_string = infra.ensure_state_db(project.cfg["checkpoint_db_url"])
     lock, gapp = _graph_for(conn_string)
     thread = {"configurable": {"thread_id": project.thread_id(slice_id)}}
     with lock:
         snap = gapp.get_state(thread)
-        hist = list(gapp.get_state_history(thread))
+        hist = [] if light else list(gapp.get_state_history(thread))
     hist.reverse()  # oldest -> newest
 
     # Per-phase active time and cost. Each snapshot's new log lines identify
@@ -195,7 +205,7 @@ def _status_payload(slug: str, slice_id: str) -> dict:
     # attributed to the phase whose marker matches. Cost inherits the known
     # undercount across crashed nodes — the live log's per-agent lines remain
     # ground truth.
-    spans = _activity_spans(
+    spans = [] if light else _activity_spans(
         project.dir / ".factory" / "live" / f"{slice_id}.log")
     phase_active: dict[str, float] = {}
     phase_cost: dict[str, float] = {}
@@ -347,7 +357,7 @@ def _status_payload(slug: str, slice_id: str) -> dict:
         "phases": phases,
         "gate": gate_payload,
         "stack": stack_payload,
-        "repo": _repo_info(project),
+        "repo": None if light else _repo_info(project),
         "log_tail": log[-15:],
         "log_count": len(log),
         "idle": not next_nodes,
@@ -969,7 +979,7 @@ def overview():
         slices = []
         for s in sorted(project.slices, key=lambda s: (s.wave, s.path.name)):
             try:
-                d = _status_payload(slug, s.id)
+                d = _status_payload(slug, s.id, light=True, project=project)
                 slices.append({
                     "id": s.id, "name": s.name, "wave": s.wave,
                     "status_label": d["status_label"], "progress_pct": d["progress_pct"],
@@ -1047,7 +1057,7 @@ def overview():
                 "approved_by": plan.get("approved_by"),
                 "total_slices": len(plan["slices"]),
                 "completed": len(project.state.get("completed_slices", [])),
-                "project_budget_usd": float(project.cfg.get("project_budget_usd", 100.0)),
+                "project_budget_usd": planmod.project_budget_usd(project, plan),
                 "spent_usd": project.spent_usd(),
                 "runner": runner_state,
                 "decisions": (decmod.stats(reg) if reg else None),
@@ -1108,7 +1118,7 @@ def api_get_plan(slug: str):
                        "completed": s["id"] in set(project.state.get("completed_slices", []))})
     return {"plan": {**plan, "slices": slices},
             "approved": planmod.plan_is_approved(plan),
-            "project_budget_usd": float(project.cfg.get("project_budget_usd", 100.0)),
+            "project_budget_usd": planmod.project_budget_usd(project, plan),
             "spent_usd": project.spent_usd(),
             "runner": runner.get_state(str(project.dir), "project")}
 

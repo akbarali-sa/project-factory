@@ -537,9 +537,10 @@ def _resume_cfg(project) -> dict:
     through run-project.
     """
     from . import planner as planmod
-    if not planmod.plan_is_approved(planmod.load_plan(project)):
+    plan = planmod.load_plan(project)
+    if not planmod.plan_is_approved(plan):
         return project.cfg
-    project_budget = float(project.cfg.get("project_budget_usd", 100.0))
+    project_budget = planmod.project_budget_usd(project, plan)
     return {**project.cfg,
             "gates": _project_gate_policy(project, None),
             "merge_on_approval": True,
@@ -688,7 +689,8 @@ def _cmd_run_project(args) -> int:
         return 2
 
     gates = _project_gate_policy(project, _parse_gates(args.gates))
-    project_budget = float(project.cfg.get("project_budget_usd", 100.0))
+    plan = planmod.load_plan(project)
+    project_budget = planmod.project_budget_usd(project, plan)
     spent = project.spent_usd()
 
     print(f"project      {project.slug}  ({project.dir})")
@@ -698,7 +700,6 @@ def _cmd_run_project(args) -> int:
     print(f"gate policy  {json.dumps(gates)}  (Gate C human by default)")
 
     # ---- phase 1: the plan (project-level gate) ----------------------------
-    plan = planmod.load_plan(project)
     if not (plan and plan.get("slices")):
         if args.dry_run:
             print("\n--dry-run: would plan slices from the board "
