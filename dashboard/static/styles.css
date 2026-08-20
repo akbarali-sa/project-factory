@@ -116,6 +116,20 @@ button.link-btn {
 .project-card-head { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
 .project-card-head .name { font-weight: 700; font-size: 1rem; }
 .project-card-head .count { color: var(--muted); font-size: 0.78rem; }
+.project-card-head .head-right { display: flex; align-items: center; gap: 8px; }
+.pc-delete {
+  background: none; border: none; cursor: pointer; font-size: 0.85rem; line-height: 1;
+  padding: 4px 6px; border-radius: 8px; opacity: 0.35; transition: opacity .12s ease, background .12s ease;
+}
+.project-card:hover .pc-delete { opacity: 0.8; }
+.pc-delete:hover { opacity: 1; background: var(--red-soft); }
+.delete-bar {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 12px 18px; border-bottom: 1px solid var(--red-soft);
+  background: var(--red-soft); color: var(--red); font-size: 0.82rem; line-height: 1.45;
+}
+.delete-bar code { font-size: 0.8rem; }
+.delete-bar-actions { display: flex; gap: 8px; flex: none; }
 .slice-row {
   display: flex; align-items: center; gap: 10px; padding: 12px 18px; border-bottom: 1px solid var(--border);
   cursor: pointer; transition: background .12s ease;

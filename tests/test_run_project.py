@@ -268,6 +268,46 @@ class ProjectAccountingTests(unittest.TestCase):
             self.assertEqual(planner.project_budget_usd(p, plan), 500.0)
 
 
+class WipeProjectTests(unittest.TestCase):
+    """wipe_project against a throwaway workspace. Postgres endpoints point
+    at 127.0.0.1:1 (instant refusal), so the db/checkpoint steps must land in
+    `errors` while the directory still gets removed — a dead Postgres must
+    never make a project undeletable."""
+
+    def _scaffolded(self, td: str) -> pathlib.Path:
+        pdir = pathlib.Path(td) / "doomed"
+        (pdir / "specs").mkdir(parents=True)
+        (pdir / "repo").mkdir()
+        (pdir / ".factory" / "live").mkdir(parents=True)
+        # dead pid: kill path must skip it without error
+        (pdir / ".factory" / "live" / "project.pid").write_text(
+            json.dumps({"pid": 2 ** 22 - 1}))
+        (pdir / "run.json").write_text(json.dumps({
+            "db_host": "127.0.0.1", "db_port": 1,
+            "checkpoint_db_url": "postgresql://x:x@127.0.0.1:1/none",
+        }))
+        return pdir
+
+    def test_wipes_dir_and_reports_unreachable_db(self) -> None:
+        from project_factory import wipe
+        with tempfile.TemporaryDirectory() as td:
+            pdir = self._scaffolded(td)
+            out = wipe.wipe_project("doomed", workspace=td)
+            self.assertFalse(pdir.exists())
+            self.assertTrue(out["dir_deleted"])
+            self.assertEqual(out["runs_killed"], [])
+            self.assertIn("database", out["errors"])
+            self.assertIn("checkpoints", out["errors"])
+
+    def test_rejects_bad_slug_and_missing_project(self) -> None:
+        from project_factory import wipe
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(cfgmod.ConfigError):
+                wipe.wipe_project("../evil", workspace=td)
+            with self.assertRaises(cfgmod.ConfigError):
+                wipe.wipe_project("nope", workspace=td)
+
+
 class GatePolicyTests(unittest.TestCase):
     def test_default_is_human(self) -> None:
         self.assertEqual(_gate_policy({"cfg": {}}, "spec"), "human")

@@ -484,9 +484,26 @@ def _timeline_payload(slug: str, slice_id: str) -> dict:
 
 
 @app.get("/api/projects")
+def _created_at(slug: str) -> float:
+    """Project creation time, for newest-first ordering. Birth time where the
+    filesystem has one (APFS does); mtime of run.json otherwise — the project
+    DIR's mtime moves every run, which would reshuffle cards mid-work."""
+    pdir = cfgmod.resolve_workspace() / slug
+    anchor = pdir / "run.json"
+    try:
+        st = (anchor if anchor.exists() else pdir).stat()
+    except OSError:
+        return 0.0
+    return getattr(st, "st_birthtime", None) or st.st_mtime
+
+
+def _projects_newest_first() -> list[str]:
+    return sorted(cfgmod.list_projects(), key=_created_at, reverse=True)
+
+
 def list_projects():
     out = []
-    for slug in cfgmod.list_projects():
+    for slug in _projects_newest_first():
         try:
             project = cfgmod.discover(slug)
         except cfgmod.ConfigError:
@@ -794,6 +811,25 @@ def _project_or_404(slug: str) -> cfgmod.Project:
         raise HTTPException(404, str(e)) from e
 
 
+@app.delete("/api/projects/{slug}")
+def delete_project(slug: str, confirm: str = ""):
+    """
+    Permanently wipe a project: tracked runs, the generated app's dev
+    servers, its database, its checkpoint threads, and the whole project
+    directory (specs, repo + branches, logs). `confirm` must echo the slug
+    exactly — the UI's confirmation dialog supplies it; a bare DELETE
+    deletes nothing. Deliberately NOT _project_or_404: a half-broken
+    project that discover() rejects must still be deletable.
+    """
+    from project_factory import wipe
+    if confirm != slug:
+        raise HTTPException(400, "confirm must equal the project slug")
+    try:
+        return wipe.wipe_project(slug)
+    except cfgmod.ConfigError as e:
+        raise HTTPException(404, str(e)) from e
+
+
 def _spec_path(project: cfgmod.Project, name: str) -> pathlib.Path:
     specs = (project.dir / "specs").resolve()
     p = (specs / name).resolve()
@@ -970,7 +1006,7 @@ def overview():
     misconfigured project can't blank the whole page.
     """
     out = []
-    for slug in cfgmod.list_projects():
+    for slug in _projects_newest_first():
         try:
             project = cfgmod.discover(slug)
         except cfgmod.ConfigError as e:
@@ -1321,8 +1357,16 @@ def health():
 
 @app.get("/")
 async def home():
-    html = (pathlib.Path(__file__).resolve().parent / "static" / "index.html").read_text()
-    return HTMLResponse(html)
+    static = pathlib.Path(__file__).resolve().parent / "static"
+    html = (static / "index.html").read_text()
+    # Asset versions come from file mtimes, not the hand-bumped ?v=N in
+    # index.html — forgetting the bump shipped stale JS more than once
+    # (the manual number is kept in the file only as a fallback).
+    html = re.sub(
+        r"/static/(app\.js|styles\.css)\?v=[^\"']*",
+        lambda m: f"/static/{m.group(1)}?v={int((static / m.group(1)).stat().st_mtime)}",
+        html)
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/p/{slug}/decisions")

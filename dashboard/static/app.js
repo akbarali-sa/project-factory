@@ -35,6 +35,10 @@ const state = {
   specFiles: [],
   specCurrent: null,
   specDirty: false,
+  cardHtml: {},          // slug -> last-rendered card markup (grid diffing)
+  lastOverviewText: null, // last /api/overview body — unchanged => skip render
+  deleteArmed: null,
+  deleting: null,
 };
 
 // ---------------------------------------------------------------- utilities
@@ -186,10 +190,15 @@ async function fetchOverview() {
   const seq = ++overviewSeq;
   try {
     const res = await fetch('/api/overview');
-    const data = await res.json();
+    const text = await res.text();
     if (seq <= overviewRendered) return;
     overviewRendered = seq;
-    renderOverview(data);
+    // Identical body => nothing to do; skipping the render (not just the
+    // patch) keeps an idle grid completely still between polls.
+    if (text !== state.lastOverviewText) {
+      state.lastOverviewText = text;
+      renderOverview(JSON.parse(text));
+    }
     setConn(true);
   } catch (e) {
     if (seq > overviewRendered) setConn(false);
@@ -216,12 +225,55 @@ function renderOverview(projects) {
   document.getElementById('fleet-parked').textContent = parkedCount;
   document.getElementById('fleet-cost').textContent = '$' + totalCost.toFixed(2);
 
-  el.innerHTML = projects.map(p => `
-    <div class="project-card">
+  // Fluid grid: rebuild the whole grid only when the SET or ORDER of
+  // projects changed; otherwise patch just the cards whose markup differs.
+  // A full innerHTML rewrite every poll tears buttons and links out from
+  // under the cursor mid-click and restarts CSS transitions — the grid
+  // visibly "blinks" every 4 seconds.
+  const html = projects.map(projectCardHtml);
+  const cards = [...el.children];
+  const sameShape = cards.length === projects.length &&
+    projects.every((p, i) => cards[i].dataset.slug === p.slug);
+  if (!sameShape) {
+    el.innerHTML = html.join('');
+    state.cardHtml = Object.fromEntries(projects.map((p, i) => [p.slug, html[i]]));
+    return;
+  }
+  projects.forEach((p, i) => {
+    if (state.cardHtml[p.slug] !== html[i]) {
+      state.cardHtml[p.slug] = html[i];
+      cards[i].outerHTML = html[i];
+    }
+  });
+}
+
+function projectCardHtml(p) {
+  const armed = state.deleteArmed === p.slug;
+  const deleting = state.deleting === p.slug;
+  const dbName = p.slug.replace(/-/g, '_');
+  const deleteBar = deleting ? `
+      <div class="delete-bar">wiping project — processes, database, checkpoints, files…</div>`
+    : armed ? `
+      <div class="delete-bar" onclick="event.stopPropagation()">
+        <span>Permanently delete <b>${escapeHtml(p.slug)}</b>? Stops its runs and wipes
+        specs, repo &amp; branches, database <code>${escapeHtml(dbName)}</code>,
+        checkpoint history and logs. This cannot be undone.</span>
+        <span class="delete-bar-actions">
+          <button class="btn btn-danger" onclick="deleteProject('${escapeAttr(p.slug)}')">Delete forever</button>
+          <button class="btn" onclick="cancelDelete()">Cancel</button>
+        </span>
+      </div>` : '';
+  return `
+    <div class="project-card" data-slug="${escapeAttr(p.slug)}">
       <div class="project-card-head">
         <div class="name">${escapeHtml(p.slug)}</div>
-        <div class="count">${p.slices.length} slice${p.slices.length === 1 ? '' : 's'}</div>
+        <div class="head-right">
+          <div class="count">${p.slices.length} slice${p.slices.length === 1 ? '' : 's'}</div>
+          <button class="pc-delete" title="Delete project…" ${deleting ? 'disabled' : ''}
+            onclick="event.stopPropagation(); armDelete('${escapeAttr(p.slug)}')">🗑</button>
+        </div>
       </div>
+      ${deleteBar}
       ${p.project ? renderProjectBanner(p.slug, p.project) : ''}
       ${p.error ? `<div class="empty-note">${escapeHtml(p.error)}</div>` : p.slices.map(s => `
         <div class="slice-row${s.planned_only ? ' planned-only' : ''}"${s.planned_only ? '' : ` onclick="goDetail('${escapeAttr(p.slug)}','${escapeAttr(s.id)}')"`}>
@@ -244,9 +296,47 @@ function renderOverview(projects) {
         </div>
       `).join('')}
     </div>
-  `).join('');
+  `;
 }
 function escapeAttr(s) { return String(s).replace(/'/g, "\\'"); }
+
+// --------------------------------------------------------------- delete flow
+function armDelete(slug) {
+  state.deleteArmed = slug;
+  state.cardHtml = {};              // force the card to re-render its confirm bar
+  renderOverview(state.projects);
+}
+function cancelDelete() {
+  state.deleteArmed = null;
+  state.cardHtml = {};
+  renderOverview(state.projects);
+}
+async function deleteProject(slug) {
+  state.deleteArmed = null;
+  state.deleting = slug;
+  state.cardHtml = {};
+  renderOverview(state.projects);
+  try {
+    const res = await fetch(`/api/projects/${encodeURIComponent(slug)}?confirm=${encodeURIComponent(slug)}`,
+                            { method: 'DELETE' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      window.alert(`delete failed — ${res.status}: ${data.detail || 'unknown error'}`);
+    } else if (data.errors && Object.keys(data.errors).length) {
+      // The directory is gone but a side effect failed (e.g. Postgres down):
+      // say WHICH residue survived rather than pretending the wipe was total.
+      window.alert('project deleted, but some cleanup failed:\n'
+        + Object.entries(data.errors).map(([k, v]) => `  ${k}: ${v}`).join('\n'));
+    }
+  } catch (e) {
+    window.alert(`delete failed — network error: ${e.message}`);
+  }
+  state.deleting = null;
+  state.lastOverviewText = null;    // the grid genuinely changed — force a render
+  state.projects = state.projects.filter(p => p.slug !== slug);
+  renderOverview(state.projects);
+  await fetchOverview();
+}
 
 // -------------------------------------------------------------- run-project
 function renderProjectBanner(slug, pj) {
@@ -1009,6 +1099,7 @@ async function createProject() {
       }, ...state.projects]);
     }
     state.projects = [];  // force switcher refresh
+    state.lastOverviewText = null;  // grid changed for real — never skip this render
     await fetchOverview();
     if (data.slices && data.slices.length) goDetail(data.slug, data.slices[0].id);
   } catch (e) {
