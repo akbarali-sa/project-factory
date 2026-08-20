@@ -772,6 +772,18 @@ class OracleLeakTests(unittest.TestCase):
                                          board_text=self.BOARD_TEXT)
         self.assertEqual(errors, [])
 
+    def test_whole_board_vocab_allowed_for_infra_slice(self) -> None:
+        # Regression (truev1 2026-08-20): a foundation slice owns only infra
+        # events, but its oracle must still name the product. The leak
+        # reference is the WHOLE board, so nouns from events the slice does
+        # NOT own must pass. 'barcode' appears in EVENTS but pretend the
+        # slice owns none of them: whole-board reference must still allow it.
+        infra_planned = {**PLANNED, "event_ids": []}
+        errors = planner.validate_oracle(_oracle_yaml(), infra_planned,
+                                         board_text=self.BOARD_TEXT
+                                         + json.dumps(infra_planned))
+        self.assertEqual([e for e in errors if "domain noun" in e], [])
+
     def test_exemplar_canary_is_rejected(self) -> None:
         doc = json.loads(_oracle_yaml())
         doc["scenarios"][0]["given"] = ["A folio exists with 2 specimen entries"]

@@ -899,7 +899,14 @@ def author_oracle(project: cfgmod.Project, planned: dict, *,
             project.dir.parent, exclude_project=project.dir.name)
     except Exception:
         extra_nouns = []
-    board_text = json.dumps(events) + json.dumps(planned)
+    # Leak-guard reference: the WHOLE board, not this slice's events.
+    # Contamination is a project-level question — a noun is legitimate if it
+    # appears anywhere on THIS project's board. Scoping the reference to the
+    # slice's own events made every foundation-slice oracle unpassable
+    # (platform slices own infra events; their oracles must still name the
+    # product): three Opus attempts died on truev1's platform slice before
+    # this widened, 2026-08-20. `events` stays slice-scoped for the PROMPT.
+    board_text = json.dumps(board) + json.dumps(planned)
 
     # Reviewed-decomposition extras (present when the plan came from a
     # backlog): the stories this slice implements, the engagement's hard
